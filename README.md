@@ -36,109 +36,89 @@ Nothing is written to disk in your project. Nothing leaves your machine.
 
 ## Quick start
 
-Installation
-1. Build the .vsix package
+1. Install project dependencies:
 
-Clone the repository and install the project dependencies:
+   ```bash
+   npm install
+   ```
 
-npm install
+2. Install the VS Code Extension packaging tool:
 
-Install vsce as a development dependency:
+   ```bash
+   npm install --save-dev @vscode/vsce
+   ```
 
-npm install --save-dev @vscode/vsce
+3. Build the extension and create the `.vsix` package:
 
-Package the extension:
+   ```bash
+   npx vsce package
+   ```
 
-npx vsce package
+   This generates a file similar to:
 
-This will create a .vsix file in the project directory:
+   ```text
+   runtime-lens-0.1.0.vsix
+   ```
 
-runtime-lens-0.1.0.vsix
-2. Install the .vsix in VS Code
+4. Install the generated `.vsix`:
 
-Install the generated VSIX:
+   ```bash
+   code --install-extension runtime-lens-0.1.0.vsix
+   ```
 
-code --install-extension runtime-lens-0.1.0.vsix
+5. Open a JS/TS project and run **Runtime Lens: Start** (`Cmd/Ctrl+Shift+P`). The status bar shows:
 
-Or, in VS Code:
+   ```text
+   Runtime Lens: Active
+   ```
 
-Open the Extensions panel.
-Click the ... menu.
-Select Install from VSIX....
-Select runtime-lens-0.1.0.vsix.
-3. Start Runtime Lens
+6. Run **Runtime Lens: Show Diagnostics**. It prints the exact command or configuration snippet for *your* project.
 
-Open a JavaScript/TypeScript project and run:
+   **Node (CommonJS)**
 
-Runtime Lens: Start
+   ```bash
+   RUNTIME_LENS_PORT=51731 RUNTIME_LENS_TOKEN=… \
+   node --require …/out/src/integrations/node-require.cjs index.js
+   ```
 
-Open the Command Palette with Cmd/Ctrl+Shift+P and search for:
+   **Node (ESM / TypeScript)**
 
-Runtime Lens: Start
+   ```bash
+   RUNTIME_LENS_PORT=51731 RUNTIME_LENS_TOKEN=… \
+   node --import …/out/src/integrations/node-loader.mjs src/index.ts
+   ```
 
-The status bar should show:
+   **Vite / React**
 
-Runtime Lens: Active
-4. Configure Runtime Lens
+   ```ts
+   import { defineConfig } from 'vite';
+   import runtimeLens from '…/out/src/integrations/vite-plugin.js';
 
-Run:
+   export default defineConfig({
+     plugins: [runtimeLens()]
+   });
+   ```
 
-Runtime Lens: Show Diagnostics
+   **Next.js (Pages and/or App Router)**
 
-This prints the exact command or configuration snippet required for your project.
+   ```js
+   const nextConfig = {
+     webpack(config) {
+       config.module.rules.push({
+         test: /\.(js|jsx|ts|tsx)$/,
+         exclude: /node_modules|\.next/,
+         use: [{ loader: '…/out/src/integrations/webpack-loader.js' }],
+         enforce: 'pre'
+       });
 
-For example, for Node.js CommonJS:
+       return config;
+     }
+   };
 
-RUNTIME_LENS_PORT=51731 RUNTIME_LENS_TOKEN=… node --require …/out/src/integrations/node-require.cjs index.js
+   module.exports = nextConfig;
+   ```
 
-For Node.js ESM or TypeScript:
-
-RUNTIME_LENS_PORT=51731 RUNTIME_LENS_TOKEN=… node --import …/out/src/integrations/node-loader.mjs src/index.ts
-
-For Vite / React:
-
-// vite.config.ts
-import { defineConfig } from 'vite';
-import runtimeLens from '…/out/src/integrations/vite-plugin.js';
-
-export default defineConfig({
-  plugins: [runtimeLens()]
-});
-
-For Next.js:
-
-// next.config.js
-const nextConfig = {
-  webpack(config) {
-    config.module.rules.push({
-      test: /\.(js|jsx|ts|tsx)$/,
-      exclude: /node_modules|\.next/,
-      use: [{ loader: '…/out/src/integrations/webpack-loader.js' }],
-      enforce: 'pre'
-    });
-
-    return config;
-  }
-};
-
-module.exports = nextConfig;
-5. Run your application
-
-Run your application normally.
-
-Runtime Lens will begin displaying runtime values from your application.
-
-Environment Variables
-
-Runtime Lens uses the following environment variables:
-
-Variable	Description	Default
-RUNTIME_LENS_PORT	Runtime Lens server port	—
-RUNTIME_LENS_TOKEN	Authentication token	—
-RUNTIME_LENS_HOST	Runtime Lens server host	127.0.0.1
-RUNTIME_LENS_LABEL	Optional runtime label	—
-
-If RUNTIME_LENS_PORT or RUNTIME_LENS_TOKEN is not present, the hooks are completely inert. Your application will run normally without Runtime Lens instrumentation.
+7. Run your app the way you normally do. Runtime values will begin appearing inline in the editor.
 
 ---
 
