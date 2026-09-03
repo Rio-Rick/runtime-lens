@@ -1,6 +1,6 @@
 # Runtime Lens
 
-**See the real values your code produces, inline, while it runs.**
+**See the real values your code produces, inline, while it runs. (only work on webpack not work on turbopack)**
 
 Runtime Lens captures `console.*` output and marked expressions from your *actually running* JS/TS
 process — Node, Vite, React, Next.js (pages **and** app router), Express, Fastify, NestJS — and paints
