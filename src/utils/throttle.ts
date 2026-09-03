@@ -2,6 +2,16 @@
  * Trailing-edge throttle: runs at most once per `intervalMs`, and always runs
  * once more after the last call so the UI never ends up stale. Used to keep
  * decoration re-renders bounded when a hot loop floods events.
+ *
+ * `flush()` forces an update *right now*: if a trailing call is queued it
+ * runs early, and otherwise it re-invokes with the most recent args seen
+ * (falling back to no args). This matters because several call sites use
+ * `flush()` on its own - e.g. after a discrete user action like toggling
+ * pause or changing a filter - without ever calling the throttled function
+ * first. A `flush()` that only replayed an already-pending call would be a
+ * no-op there, leaving the UI stale until something else happened to
+ * schedule a call (which is why the tree/webview used to require reopening
+ * to pick up pause/filter/clear changes).
  */
 export function throttle<A extends unknown[]>(
   fn: (...args: A) => void,
@@ -10,6 +20,7 @@ export function throttle<A extends unknown[]>(
   let lastRun = 0;
   let timer: NodeJS.Timeout | undefined;
   let pending: A | undefined;
+  let lastArgs: A | undefined;
 
   const run = (args: A): void => {
     lastRun = Date.now();
@@ -18,6 +29,7 @@ export function throttle<A extends unknown[]>(
   };
 
   const throttled = (...args: A): void => {
+    lastArgs = args;
     const now = Date.now();
     const elapsed = now - lastRun;
     if (elapsed >= intervalMs && timer === undefined) {
@@ -43,9 +55,9 @@ export function throttle<A extends unknown[]>(
       clearTimeout(timer);
       timer = undefined;
     }
-    if (pending) {
-      run(pending);
-    }
+    // Prefer a genuinely queued call; otherwise force a run with the last
+    // known args (or none) so `flush()` always guarantees freshness.
+    run(pending ?? lastArgs ?? ([] as unknown as A));
   };
 
   throttled.cancel = (): void => {

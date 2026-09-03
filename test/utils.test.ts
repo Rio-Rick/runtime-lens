@@ -162,6 +162,20 @@ describe('utils/throttle', () => {
     throttled.cancel();
   });
 
+  it('flush() forces an immediate run even with nothing pending', () => {
+    // Regression test: several callers (e.g. the Runtime Explorer tree)
+    // invoke flush() on its own, after a discrete action like toggling
+    // pause or changing a filter, without ever calling the throttled
+    // function first. flush() must not be a no-op in that case, or the
+    // view silently goes stale until something unrelated happens to
+    // schedule a call.
+    const calls: number[] = [];
+    const throttled = throttle(() => calls.push(Date.now()), 1000);
+    throttled.flush();
+    assert.equal(calls.length, 1, 'flush() should run the function even when nothing was queued');
+    throttled.cancel();
+  });
+
   it('cancel() drops the pending call', async () => {
     const calls: string[] = [];
     const throttled = throttle((s: string) => calls.push(s), 20);

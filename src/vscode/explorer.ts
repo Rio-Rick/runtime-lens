@@ -30,10 +30,6 @@ export class RuntimeExplorerProvider implements vscode.TreeDataProvider<Explorer
   private follow = true;
   private view: vscode.TreeView<ExplorerNode> | undefined;
   private readonly disposables: vscode.Disposable[] = [];
-  // Throttled: only for the high-frequency path (a hot loop flooding `added`
-  // events). Every other caller wants an immediate, guaranteed refresh, which
-  // is what refreshNow() below provides - throttle().flush() is NOT that; it
-  // only re-runs a call that's already queued, and is a no-op otherwise.
   private readonly refresh = throttle(() => this.changeEmitter.fire(undefined), 150);
 
   constructor(private readonly store: EventStore, private readonly getConfig: () => RenderConfig) {
@@ -45,8 +41,8 @@ export class RuntimeExplorerProvider implements vscode.TreeDataProvider<Explorer
         }
       }
     });
-    const cleared = this.store.emitter.on('cleared', () => this.refreshNow());
-    const filtered = this.store.emitter.on('filter-changed', () => this.refreshNow());
+    const cleared = this.store.emitter.on('cleared', () => this.refresh());
+    const filtered = this.store.emitter.on('filter-changed', () => this.refresh.flush());
     this.disposables.push(
       { dispose: () => added.dispose() },
       { dispose: () => cleared.dispose() },
@@ -61,13 +57,13 @@ export class RuntimeExplorerProvider implements vscode.TreeDataProvider<Explorer
 
   setSessions(sessions: SessionInfo[]): void {
     this.sessions = sessions;
-    this.refreshNow();
+    this.refresh.flush();
   }
 
   setPaused(paused: boolean): void {
     this.paused = paused;
     this.updateDescription();
-    this.refreshNow();
+    this.refresh.flush();
   }
 
   get isPaused(): boolean {
@@ -77,23 +73,7 @@ export class RuntimeExplorerProvider implements vscode.TreeDataProvider<Explorer
   toggleFollow(): boolean {
     this.follow = !this.follow;
     this.updateDescription();
-    if (this.follow) {
-      // Jump to the latest event right away rather than waiting for the next
-      // one to arrive, so switching follow on feels immediate.
-      this.revealLatest(this.store.list(1)[0]);
-    }
     return this.follow;
-  }
-
-  /**
-   * Force an immediate tree refresh, bypassing the throttle entirely.
-   * Use this for one-off, user-initiated changes (filter, pause, session
-   * list, clear) where staleness is not acceptable. Reserve the throttled
-   * `refresh()` for the high-frequency `added` event stream.
-   */
-  private refreshNow(): void {
-    this.refresh.cancel();
-    this.changeEmitter.fire(undefined);
   }
 
   get isFollowing(): boolean {
