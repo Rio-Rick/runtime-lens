@@ -1,0 +1,10 @@
+{
+  "name": "rl-fixture-node-ts",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": { "dev": "node --experimental-strip-types src/index.ts" },
+  "devDependencies": { "typescript": "^5.4.0" },
+  "dependencies": { "fastify": "^4.26.0" }
+}

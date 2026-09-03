@@ -1,0 +1,279 @@
+{
+  "name": "runtime-lens",
+  "displayName": "Runtime Lens",
+  "description": "See real runtime values from your running JS/TS code inline in the editor \u2014 console output, expression probes, execution counts and a live runtime explorer.",
+  "version": "0.1.0",
+  "publisher": "runtime-lens",
+  "license": "MIT",
+  "author": "Runtime Lens contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/runtime-lens/runtime-lens.git"
+  },
+  "bugs": {
+    "url": "https://github.com/runtime-lens/runtime-lens/issues"
+  },
+  "homepage": "https://github.com/runtime-lens/runtime-lens#readme",
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "Debuggers",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "runtime values",
+    "console",
+    "inline values",
+    "javascript",
+    "typescript",
+    "react",
+    "next.js",
+    "vite"
+  ],
+  "activationEvents": [
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "workspaceContains:**/package.json"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "runtimeLens.start",
+        "title": "Runtime Lens: Start",
+        "icon": "$(play)"
+      },
+      {
+        "command": "runtimeLens.stop",
+        "title": "Runtime Lens: Stop",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "runtimeLens.restart",
+        "title": "Runtime Lens: Restart",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "runtimeLens.clearLogs",
+        "title": "Runtime Lens: Clear Logs",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "runtimeLens.pauseCapture",
+        "title": "Runtime Lens: Pause Capture",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "runtimeLens.resumeCapture",
+        "title": "Runtime Lens: Resume Capture",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "runtimeLens.showRuntimeExplorer",
+        "title": "Runtime Lens: Show Runtime Explorer",
+        "icon": "$(telescope)"
+      },
+      {
+        "command": "runtimeLens.toggleInlineValues",
+        "title": "Runtime Lens: Toggle Inline Values",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "runtimeLens.showDiagnostics",
+        "title": "Runtime Lens: Show Diagnostics",
+        "icon": "$(report)"
+      },
+      {
+        "command": "runtimeLens.setFilter",
+        "title": "Runtime Lens: Search / Filter Events",
+        "icon": "$(search)"
+      },
+      {
+        "command": "runtimeLens.toggleFollow",
+        "title": "Runtime Lens: Toggle Follow Latest",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "runtimeLens.revealEvent",
+        "title": "Runtime Lens: Reveal Event Source"
+      },
+      {
+        "command": "runtimeLens.copyEventValue",
+        "title": "Runtime Lens: Copy Event Value",
+        "icon": "$(copy)"
+      }
+    ],
+    "configuration": {
+      "title": "Runtime Lens",
+      "properties": {
+        "runtimeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch. When off, Runtime Lens does not start its runtime server and does not instrument any code."
+        },
+        "runtimeLens.inlineValues": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render captured runtime values as inline decorations at the end of the originating line."
+        },
+        "runtimeLens.captureConsole": {
+          "type": "boolean",
+          "default": true,
+          "description": "Capture console.log / info / warn / error / debug / table calls."
+        },
+        "runtimeLens.captureExpressions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Capture expressions marked with a `// ?` trailing comment probe."
+        },
+        "runtimeLens.maxInlineLength": {
+          "type": "number",
+          "default": 120,
+          "minimum": 10,
+          "maximum": 2000,
+          "description": "Maximum number of characters rendered in an inline value decoration."
+        },
+        "runtimeLens.objectDepth": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "How deep objects/arrays/Maps/Sets are serialized before being replaced by a summary."
+        },
+        "runtimeLens.maxHistory": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 50,
+          "maximum": 100000,
+          "description": "Maximum number of runtime events kept in the bounded in-memory history."
+        },
+        "runtimeLens.showTimestamp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the capture timestamp in inline decorations and the Runtime Explorer."
+        },
+        "runtimeLens.showExecutionCount": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show how many times a probe has executed, rendered as `// => value \u00d7 N`."
+        },
+        "runtimeLens.port": {
+          "type": "number",
+          "default": 0,
+          "description": "Preferred localhost port for the runtime server. 0 picks a free ephemeral port automatically."
+        },
+        "runtimeLens.maxPayloadBytes": {
+          "type": "number",
+          "default": 262144,
+          "minimum": 4096,
+          "description": "Maximum accepted size, in bytes, of a single batch message from an instrumented process."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "runtimeLens",
+          "title": "Runtime Lens",
+          "icon": "media/lens.svg"
+        }
+      ]
+    },
+    "views": {
+      "runtimeLens": [
+        {
+          "id": "runtimeLens.explorer",
+          "name": "Runtime Lens",
+          "contextualTitle": "Runtime Lens"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "runtimeLens.setFilter",
+          "when": "view == runtimeLens.explorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "runtimeLens.pauseCapture",
+          "when": "view == runtimeLens.explorer && !runtimeLens.paused",
+          "group": "navigation@2"
+        },
+        {
+          "command": "runtimeLens.resumeCapture",
+          "when": "view == runtimeLens.explorer && runtimeLens.paused",
+          "group": "navigation@2"
+        },
+        {
+          "command": "runtimeLens.toggleFollow",
+          "when": "view == runtimeLens.explorer",
+          "group": "navigation@3"
+        },
+        {
+          "command": "runtimeLens.clearLogs",
+          "when": "view == runtimeLens.explorer",
+          "group": "navigation@4"
+        },
+        {
+          "command": "runtimeLens.showRuntimeExplorer",
+          "when": "view == runtimeLens.explorer",
+          "group": "navigation@5"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "runtimeLens.revealEvent",
+          "when": "view == runtimeLens.explorer && viewItem == runtimeLensEvent",
+          "group": "inline@1"
+        },
+        {
+          "command": "runtimeLens.copyEventValue",
+          "when": "view == runtimeLens.explorer && viewItem == runtimeLensEvent",
+          "group": "inline@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "clean": "rimraf out",
+    "compile": "tsc -p ./ && node scripts/copy-assets.js",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "mocha --reporter spec \"out/test/**/*.test.js\"",
+    "lint": "tsc -p ./ --noEmit",
+    "package": "vsce package --out runtime-lens-0.1.0.vsix",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "@babel/core": "^7.24.0",
+    "@babel/generator": "^7.24.0",
+    "@babel/parser": "^7.24.0",
+    "@babel/plugin-syntax-jsx": "^7.24.0",
+    "@babel/plugin-transform-modules-commonjs": "^7.24.0",
+    "@babel/plugin-transform-typescript": "^7.24.0",
+    "@babel/traverse": "^7.24.0",
+    "@babel/types": "^7.24.0",
+    "@jridgewell/trace-mapping": "^0.3.25",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/babel__core": "^7.20.5",
+    "@types/babel__generator": "^7.6.8",
+    "@types/babel__traverse": "^7.20.5",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "@vscode/vsce": "^2.24.0",
+    "esbuild": "^0.20.0",
+    "mocha": "^10.3.0",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.4.0"
+  }
+}
