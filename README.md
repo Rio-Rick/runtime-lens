@@ -36,55 +36,109 @@ Nothing is written to disk in your project. Nothing leaves your machine.
 
 ## Quick start
 
-1. Install the `.vsix`:
+Installation
+1. Build the .vsix package
 
-   ```bash
-   code --install-extension runtime-lens-0.1.0.vsix
-   ```
+Clone the repository and install the project dependencies:
 
-2. Open a JS/TS project and run **Runtime Lens: Start** (`Cmd/Ctrl+Shift+P`). The status bar shows
-   `Runtime Lens: Active`.
-3. Run **Runtime Lens: Show Diagnostics** — it prints the exact command or config snippet for *your*
-   project, for example:
+npm install
 
-   ```bash
-   # Node, CommonJS
-   RUNTIME_LENS_PORT=51731 RUNTIME_LENS_TOKEN=… node --require …/out/src/integrations/node-require.cjs index.js
+Install vsce as a development dependency:
 
-   # Node, ESM or TypeScript
-   RUNTIME_LENS_PORT=51731 RUNTIME_LENS_TOKEN=… node --import …/out/src/integrations/node-loader.mjs src/index.ts
-   ```
+npm install --save-dev @vscode/vsce
 
-   ```ts
-   // vite.config.ts — Vite / React
-   import { defineConfig } from 'vite';
-   import runtimeLens from '…/out/src/integrations/vite-plugin.js';
+Package the extension:
 
-   export default defineConfig({ plugins: [runtimeLens()] });
-   ```
+npx vsce package
 
-   ```js
-   // next.config.js — Next.js (pages and/or app router)
-   const nextConfig = {
-     webpack(config) {
-       config.module.rules.push({
-         test: /\.(js|jsx|ts|tsx)$/,
-         exclude: /node_modules|\.next/,
-         use: [{ loader: '…/out/src/integrations/webpack-loader.js' }],
-         enforce: 'pre'
-       });
-       return config;
-     }
-   };
-   module.exports = nextConfig;
-   ```
+This will create a .vsix file in the project directory:
 
-4. Run your app the way you normally do. Values start appearing.
+runtime-lens-0.1.0.vsix
+2. Install the .vsix in VS Code
 
-Environment variables the hooks read: `RUNTIME_LENS_PORT`, `RUNTIME_LENS_TOKEN`,
-`RUNTIME_LENS_HOST` (default `127.0.0.1`), `RUNTIME_LENS_LABEL`. **If the port/token are absent the
-hooks are completely inert** — your program runs exactly as it did before, so it is safe to leave the
-plugin in a config file.
+Install the generated VSIX:
+
+code --install-extension runtime-lens-0.1.0.vsix
+
+Or, in VS Code:
+
+Open the Extensions panel.
+Click the ... menu.
+Select Install from VSIX....
+Select runtime-lens-0.1.0.vsix.
+3. Start Runtime Lens
+
+Open a JavaScript/TypeScript project and run:
+
+Runtime Lens: Start
+
+Open the Command Palette with Cmd/Ctrl+Shift+P and search for:
+
+Runtime Lens: Start
+
+The status bar should show:
+
+Runtime Lens: Active
+4. Configure Runtime Lens
+
+Run:
+
+Runtime Lens: Show Diagnostics
+
+This prints the exact command or configuration snippet required for your project.
+
+For example, for Node.js CommonJS:
+
+RUNTIME_LENS_PORT=51731 RUNTIME_LENS_TOKEN=… node --require …/out/src/integrations/node-require.cjs index.js
+
+For Node.js ESM or TypeScript:
+
+RUNTIME_LENS_PORT=51731 RUNTIME_LENS_TOKEN=… node --import …/out/src/integrations/node-loader.mjs src/index.ts
+
+For Vite / React:
+
+// vite.config.ts
+import { defineConfig } from 'vite';
+import runtimeLens from '…/out/src/integrations/vite-plugin.js';
+
+export default defineConfig({
+  plugins: [runtimeLens()]
+});
+
+For Next.js:
+
+// next.config.js
+const nextConfig = {
+  webpack(config) {
+    config.module.rules.push({
+      test: /\.(js|jsx|ts|tsx)$/,
+      exclude: /node_modules|\.next/,
+      use: [{ loader: '…/out/src/integrations/webpack-loader.js' }],
+      enforce: 'pre'
+    });
+
+    return config;
+  }
+};
+
+module.exports = nextConfig;
+5. Run your application
+
+Run your application normally.
+
+Runtime Lens will begin displaying runtime values from your application.
+
+Environment Variables
+
+Runtime Lens uses the following environment variables:
+
+Variable	Description	Default
+RUNTIME_LENS_PORT	Runtime Lens server port	—
+RUNTIME_LENS_TOKEN	Authentication token	—
+RUNTIME_LENS_HOST	Runtime Lens server host	127.0.0.1
+RUNTIME_LENS_LABEL	Optional runtime label	—
+
+If RUNTIME_LENS_PORT or RUNTIME_LENS_TOKEN is not present, the hooks are completely inert. Your application will run normally without Runtime Lens instrumentation.
 
 ---
 
