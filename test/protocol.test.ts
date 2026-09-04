@@ -6,7 +6,9 @@ import {
   PROTOCOL_VERSION,
   isCompatibleVersion,
   parseClientMessage,
+  parseServerMessage,
   validateClientMessage,
+  validateServerMessage,
   validateSerializedValue,
   type RuntimeEvent
 } from '../src/protocol';
@@ -232,5 +234,73 @@ describe('protocol', () => {
     const res = validateClientMessage({ t: 'bye', v: V, sessionId: 's', reason: 'r'.repeat(5000) });
     assert.equal(res.ok, true);
     assert.equal(res.ok ? (res.value as { reason: string }).reason.length : -1, 500);
+  });
+});
+
+describe('protocol: server -> agent messages', () => {
+  it('validates a well-formed config push', () => {
+    const res = validateServerMessage({
+      t: 'config',
+      v: V,
+      captureConsole: true,
+      captureExpressions: false,
+      paused: true,
+      objectDepth: 10
+    });
+    assert.equal(res.ok, true);
+    assert.deepEqual(
+      res.ok && res.value,
+      { t: 'config', v: V, captureConsole: true, captureExpressions: false, paused: true, objectDepth: 10 }
+    );
+  });
+
+  it('floors a fractional objectDepth and rejects a negative one', () => {
+    const floored = validateServerMessage({
+      t: 'config',
+      v: V,
+      captureConsole: true,
+      captureExpressions: true,
+      paused: false,
+      objectDepth: 7.9
+    });
+    assert.equal(floored.ok && floored.value.t === 'config' && floored.value.objectDepth, 7);
+
+    const negative = validateServerMessage({
+      t: 'config',
+      v: V,
+      captureConsole: true,
+      captureExpressions: true,
+      paused: false,
+      objectDepth: -1
+    });
+    assert.equal(!negative.ok && negative.code, 'bad-message');
+  });
+
+  it('rejects a config push missing a required field', () => {
+    const res = validateServerMessage({ t: 'config', v: V, captureConsole: true, paused: false, objectDepth: 3 });
+    assert.equal(!res.ok && res.code, 'bad-message');
+    assert.match(!res.ok ? res.error : '', /captureExpressions/);
+  });
+
+  it('rejects an incompatible protocol version', () => {
+    const res = validateServerMessage({
+      t: 'config',
+      v: '2.0.0',
+      captureConsole: true,
+      captureExpressions: true,
+      paused: false,
+      objectDepth: 3
+    });
+    assert.equal(!res.ok && res.code, 'bad-version');
+  });
+
+  it('parseServerMessage parses JSON and rejects garbage', () => {
+    const good = parseServerMessage(
+      JSON.stringify({ t: 'config', v: V, captureConsole: true, captureExpressions: true, paused: false, objectDepth: 10 })
+    );
+    assert.equal(good.ok, true);
+
+    const bad = parseServerMessage('{ not json');
+    assert.equal(!bad.ok && bad.code, 'bad-message');
   });
 });

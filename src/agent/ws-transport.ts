@@ -90,6 +90,11 @@ export function createGlobalWebSocketTransport(
     socket.onerror = () => {
       open = false;
     };
+    socket.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        transport.onMessage?.(ev.data);
+      }
+    };
   }
 
   return transport;

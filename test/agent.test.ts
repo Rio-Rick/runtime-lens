@@ -8,6 +8,12 @@ class FakeTransport implements AgentTransport {
   helloPayload: ClientMessage | undefined;
   closed = false;
   throwOnSend = false;
+  onMessage: ((json: string) => void) | undefined;
+
+  /** Simulate the editor pushing a message down the wire (as ws-transport's onmessage now does). */
+  receive(payload: unknown): void {
+    this.onMessage?.(JSON.stringify(payload));
+  }
 
   send(json: string): void {
     if (this.throwOnSend) {
@@ -282,6 +288,61 @@ describe('agent/core (console interception)', () => {
       agent.dispose();
     });
     assert.equal(transport.events().length, 1);
+  });
+
+  it('wires transport.onMessage on construction so a live push can reach the agent', () => {
+    const transport = new FakeTransport();
+    const agent = makeAgent(transport);
+    assert.equal(typeof transport.onMessage, 'function', 'Agent must register a message handler on its transport');
+    agent.dispose();
+  });
+
+  it('applyConfig updates objectDepth, capture switches and pause state on the next capture', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport, { objectDepth: 3, captureConsole: true, captureExpressions: true });
+      const deep = { a: { b: { c: { d: { e: 'too deep at depth 3' } } } } };
+      agent.c('log', 'p1', '/a.ts', 1, 0, [deep]);
+      agent.applyConfig({ captureConsole: true, captureExpressions: true, paused: false, objectDepth: 10 });
+      agent.c('log', 'p2', '/a.ts', 2, 0, [deep]);
+      agent.flush();
+      agent.dispose();
+    });
+    const events = transport.events() as LogEvent[];
+    const shallow = JSON.stringify(events[0].args[0]);
+    const full = JSON.stringify(events[1].args[0]);
+    assert.match(shallow, /maxdepth/, 'depth 3 truncates a 4-level-deep object');
+    assert.doesNotMatch(full, /maxdepth/, 'depth 10 captures the same object in full after applyConfig');
+    assert.match(full, /too deep at depth 3/);
+  });
+
+  it('a config push delivered through transport.onMessage reaches the agent end-to-end', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport, { objectDepth: 3 });
+      const deep = { a: { b: { c: { d: 'value' } } } };
+      transport.receive({
+        t: 'config',
+        v: PROTOCOL_VERSION,
+        captureConsole: true,
+        captureExpressions: true,
+        paused: false,
+        objectDepth: 10
+      });
+      agent.c('log', 'p', '/a.ts', 1, 0, [deep]);
+      agent.flush();
+      agent.dispose();
+    });
+    assert.doesNotMatch(JSON.stringify((transport.events() as LogEvent[])[0].args[0]), /maxdepth/);
+  });
+
+  it('ignores malformed or stale-version pushes instead of throwing', () => {
+    const transport = new FakeTransport();
+    const agent = makeAgent(transport, { objectDepth: 3 });
+    assert.doesNotThrow(() => transport.receive({ t: 'config', v: '2.0.0', objectDepth: 10 }));
+    assert.doesNotThrow(() => transport.receive('not even an object'));
+    assert.doesNotThrow(() => transport.onMessage?.('{ not json'));
+    agent.dispose();
   });
 
   it('sends a bye and closes the transport on dispose', () => {

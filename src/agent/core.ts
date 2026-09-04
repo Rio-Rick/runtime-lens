@@ -10,7 +10,7 @@
  *  3. Never crash the host. Every callback is wrapped; a failure disables the
  *     agent instead of taking the app down.
  */
-import { PROTOCOL_VERSION, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
+import { PROTOCOL_VERSION, parseServerMessage, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
 import { serialize } from '../serialization/serializer';
 
 export interface AgentTransport {
@@ -21,6 +21,13 @@ export interface AgentTransport {
   close(): void;
   /** Fires when the transport is (re)connected or lost. */
   onStateChange?: (connected: boolean) => void;
+  /**
+   * Fires when a message arrives *from* the editor (e.g. a live `config`
+   * push). Transports that have no receive channel — the HTTP batch
+   * transport, which only ever does fire-and-forget POSTs — simply never
+   * call this, and the agent keeps running with its startup config.
+   */
+  onMessage?: (json: string) => void;
 }
 
 export interface AgentConfig {
@@ -86,7 +93,32 @@ export class Agent {
     } catch {
       this.disabled = true;
     }
+    this.transport.onMessage = (json) => this.handleServerMessage(json);
     this.startTimer();
+  }
+
+  /** Handle a raw message pushed from the editor (currently only `config`). */
+  private handleServerMessage(json: string): void {
+    try {
+      const parsed = parseServerMessage(json);
+      if (parsed.ok && parsed.value.t === 'config') {
+        this.applyConfig(parsed.value);
+      }
+    } catch {
+      /* a bad push from the editor must never affect the host program */
+    }
+  }
+
+  /**
+   * Apply capture switches pushed live from the editor (e.g. after the user
+   * changes `runtimeLens.objectDepth` in settings). Takes effect on the next
+   * captured value — nothing already serialized is retroactively deepened.
+   */
+  applyConfig(cfg: { captureConsole: boolean; captureExpressions: boolean; paused: boolean; objectDepth: number }): void {
+    this.config.captureConsole = cfg.captureConsole;
+    this.config.captureExpressions = cfg.captureExpressions;
+    this.config.objectDepth = cfg.objectDepth;
+    this.setPaused(cfg.paused);
   }
 
   private startTimer(): void {

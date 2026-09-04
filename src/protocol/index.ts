@@ -411,3 +411,76 @@ export function parseClientMessage(
   }
   return validateClientMessage(parsed, expectedToken);
 }
+
+/**
+ * Validate a raw (already JSON-parsed) message sent from the extension host
+ * down to an agent. The agent is the *client* on this connection, so there is
+ * no token to check here — the socket itself is already authenticated.
+ */
+export function validateServerMessage(raw: unknown): ValidationResult<ServerMessage> {
+  if (!isPlainRecord(raw)) {
+    return fail('bad-message', 'message must be a JSON object');
+  }
+  if (!isCompatibleVersion(raw.v)) {
+    return fail('bad-version', `incompatible protocol version ${String(raw.v)}, agent speaks ${PROTOCOL_VERSION}`);
+  }
+  switch (raw.t) {
+    case 'config': {
+      if (typeof raw.captureConsole !== 'boolean') {
+        return fail('bad-message', 'config.captureConsole must be a boolean');
+      }
+      if (typeof raw.captureExpressions !== 'boolean') {
+        return fail('bad-message', 'config.captureExpressions must be a boolean');
+      }
+      if (typeof raw.paused !== 'boolean') {
+        return fail('bad-message', 'config.paused must be a boolean');
+      }
+      if (typeof raw.objectDepth !== 'number' || !Number.isFinite(raw.objectDepth) || raw.objectDepth < 0) {
+        return fail('bad-message', 'config.objectDepth must be a non-negative number');
+      }
+      return {
+        ok: true,
+        value: {
+          t: 'config',
+          v: raw.v as string,
+          captureConsole: raw.captureConsole,
+          captureExpressions: raw.captureExpressions,
+          paused: raw.paused,
+          objectDepth: Math.floor(raw.objectDepth)
+        }
+      };
+    }
+    case 'ack':
+      return {
+        ok: true,
+        value: { t: 'ack', v: raw.v as string, received: typeof raw.received === 'number' ? raw.received : 0 }
+      };
+    case 'error':
+      return {
+        ok: true,
+        value: {
+          t: 'error',
+          v: raw.v as string,
+          code: (['bad-version', 'bad-token', 'bad-message', 'too-large', 'internal'] as const).includes(
+            raw.code as ServerErrorMessage['code']
+          )
+            ? (raw.code as ServerErrorMessage['code'])
+            : 'internal',
+          message: typeof raw.message === 'string' ? raw.message.slice(0, 2000) : ''
+        }
+      };
+    default:
+      return fail('bad-message', `unknown message type: ${String(raw.t)}`);
+  }
+}
+
+/** Parse + validate a raw message received by an agent from the extension host. */
+export function parseServerMessage(data: string): ValidationResult<ServerMessage> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch (err) {
+    return fail('bad-message', `invalid JSON: ${(err as Error).message}`);
+  }
+  return validateServerMessage(parsed);
+}
