@@ -8,7 +8,8 @@ import {
   normalizePath,
   relativeToRoot,
   requiresJsxCapableRuntime,
-  shouldInstrument
+  shouldInstrument,
+  toModuleSpecifier
 } from '../src/utils/paths';
 import { EventStore, lineKey } from '../src/runtime/store';
 import { serialize } from '../src/serialization/serializer';
@@ -245,6 +246,19 @@ describe('utils/paths', () => {
     assert.equal(relativeToRoot('/p', '/p/src/a.ts'), 'src/a.ts');
     assert.equal(relativeToRoot('/other', '/p/src/a.ts'), '/p/src/a.ts', 'outside the root, keep the absolute path');
     assert.equal(relativeToRoot('/p', '/p/deep/nested/b.tsx'), 'deep/nested/b.tsx');
+  });
+
+  it('toModuleSpecifier always returns a real relative import, never an absolute/bare path', () => {
+    assert.equal(toModuleSpecifier('/p/src/a.ts', '/p/node_modules/.cache/runtime-lens/node-agent.js'), '../node_modules/.cache/runtime-lens/node-agent.js');
+    assert.equal(
+      toModuleSpecifier('/p/src/deep/nested/a.ts', '/p/node_modules/.cache/runtime-lens/node-agent.js'),
+      '../../../node_modules/.cache/runtime-lens/node-agent.js'
+    );
+    // A same-directory neighbor must still get a leading './' - webpack and
+    // Turbopack both treat a bare specifier as a package name otherwise.
+    assert.equal(toModuleSpecifier('/p/src/a.ts', '/p/src/b.ts'), './b.ts');
+    // Already-bare specifiers (npm packages, virtual module ids) pass through untouched.
+    assert.equal(toModuleSpecifier('/p/src/a.ts', 'virtual:runtime-lens-agent'), 'virtual:runtime-lens-agent');
   });
 });
 

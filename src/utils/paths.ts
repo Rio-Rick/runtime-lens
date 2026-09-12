@@ -78,3 +78,25 @@ export function relativeToRoot(root: string, file: string): string {
   const rel = path.relative(root, file);
   return rel.startsWith('..') ? normalizePath(file) : normalizePath(rel);
 }
+
+/**
+ * Turn an absolute filesystem path into an import/require specifier relative
+ * to `fromFile`'s directory (e.g. `../../out/src/agent/node-agent.js`).
+ *
+ * Node's own module resolution accepts a bare absolute path as a specifier
+ * fine, and so does webpack - but Turbopack treats any specifier starting
+ * with `/` as a "server relative" import (akin to a public-URL path) and
+ * refuses to resolve it at all:
+ * https://github.com/vercel/next.js/issues/72575
+ * A specifier relative to the importing file works under all three, so
+ * bundler-facing code should always go through this instead of embedding an
+ * absolute path directly.
+ */
+export function toModuleSpecifier(fromFile: string, toFile: string): string {
+  if (!path.isAbsolute(toFile)) {
+    // Already a bare specifier (npm package, virtual module id, ...): leave it alone.
+    return toFile;
+  }
+  const rel = normalizePath(path.relative(path.dirname(fromFile), toFile));
+  return rel.startsWith('.') ? rel : `./${rel}`;
+}

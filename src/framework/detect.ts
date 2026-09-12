@@ -38,6 +38,9 @@ export interface ProjectProfile {
   entry?: string;
   /** Router layout for Next.js projects. */
   nextRouters: Array<'app' | 'pages'>;
+  /** Parsed `next` major/minor version, when it can be determined from the semver range in package.json. */
+  nextMajorVersion?: number;
+  nextMinorVersion?: number;
   packageManager: 'npm' | 'pnpm' | 'yarn' | 'bun';
   dependencies: Record<string, string>;
   scripts: Record<string, string>;
@@ -88,6 +91,25 @@ function readJson(fsImpl: FsLike, file: string): Record<string, unknown> | undef
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Pull a major/minor pair out of a semver range like `^15.3.1`, `~14.1.0`,
+ * `15.x`, `>=13.0.0` or a bare `16.2.0`. Returns undefined for ranges that
+ * don't start with a recognizable number (`workspace:*`, `next@canary`, ...).
+ */
+function parseMajorMinor(range: string | undefined): { major?: number; minor?: number } {
+  if (!range) {
+    return {};
+  }
+  const match = range.match(/(\d+)(?:\.(\d+))?/);
+  if (!match) {
+    return {};
+  }
+  return {
+    major: Number.parseInt(match[1], 10),
+    minor: match[2] !== undefined ? Number.parseInt(match[2], 10) : undefined
+  };
 }
 
 function firstExisting(fsImpl: FsLike, root: string, names: readonly string[]): string | undefined {
@@ -177,6 +199,8 @@ export function detectProject(root: string, fsImpl: FsLike = fs): ProjectProfile
   }
   frameworks.push('node');
 
+  const { major: nextMajorVersion, minor: nextMinorVersion } = parseMajorMinor(dependencies.next);
+
   const tsconfig = configs.tsconfig ? readJson(fsImpl, path.join(root, configs.tsconfig)) : undefined;
   const compilerOptions = (tsconfig?.compilerOptions as Record<string, unknown> | undefined) ?? {};
   const entryFromPkgRaw = typeof pkg.main === 'string' ? pkg.main : undefined;
@@ -214,6 +238,8 @@ export function detectProject(root: string, fsImpl: FsLike = fs): ProjectProfile
     configs,
     entry,
     nextRouters,
+    nextMajorVersion,
+    nextMinorVersion,
     packageManager,
     dependencies,
     scripts,

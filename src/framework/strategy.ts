@@ -102,11 +102,16 @@ export function selectStrategy(profile: ProjectProfile, ctx: StrategyContext): I
       if (profile.primary !== 'next-pages') {
         warnings.push('Values from `"use server"` code appear under the Node session, not the browser session.');
       }
+      if (profile.nextMajorVersion === undefined || profile.nextMajorVersion >= 13) {
+        warnings.push(
+          'Turbopack (the default bundler since Next.js 16, opt-in via --turbopack on 13-15) only implements a subset of the webpack loader API and does not expose this.target, so the generated config passes the client/server split as an explicit loader option instead. Run `next dev --webpack` / `next build --webpack` if you need the classic webpack path.'
+        );
+      }
       return {
         kind: 'next-webpack-loader',
-        title: 'Next.js webpack loader',
+        title: 'Next.js loader (webpack + Turbopack)',
         rationale:
-          'Next.js compiles with its own SWC/webpack pipeline. Runtime Lens registers a webpack loader (client + server passes) from next.config.*, which keeps Next in charge of compilation while still giving us an AST pass over your own files only.',
+          'Next.js compiles with its own SWC pipeline, under either webpack or Turbopack. Runtime Lens registers the same instrumenting loader both ways: a webpack loader (client + server passes) via `webpack()`, and, since Turbopack accepts a restricted subset of the webpack loader API, matching entries under `turbopack.rules` (or `experimental.turbo.rules` on Next.js < 15.3) split by the built-in `browser`/`not: "browser"` conditions. Whichever bundler your dev/build command actually uses, the loader is already wired up.',
         env,
         command: `${envPrefix(env)} ${runScript(profile, profile.scripts.dev ? 'dev' : 'start')}`,
         snippet: nextConfigSnippet(loaderDir, profile),
@@ -161,12 +166,94 @@ export function selectStrategy(profile: ProjectProfile, ctx: StrategyContext): I
   }
 }
 
+/**
+ * File-extension globs Runtime Lens instruments through Turbopack's loader
+ * rules. Kept in sync with `shouldInstrument` in utils/paths.
+ */
+const TURBOPACK_RULE_GLOBS = ['*.ts', '*.tsx', '*.js', '*.jsx'] as const;
+
+/**
+ * Build the `{ rules: {...} } ` value shared by both `turbopack.rules` (Next.js
+ * >= 15.3) and `experimental.turbo.rules` (Next.js 13.0 - 15.2).
+ *
+ * Turbopack's loader context does not implement `this.target`
+ * (https://nextjs.org/docs/app/api-reference/config/next-config-js/turbopack#missing-webpack-loader-features),
+ * so instead of letting the loader read the compiler pass off the context,
+ * each rule pins it explicitly via `options.target`, using Turbopack's
+ * built-in `browser` / `not: 'browser'` conditions to pick the right one.
+ * `foreign` (node_modules + Next internals) is excluded the same way the
+ * webpack rule below excludes them via its `exclude` pattern. `as` re-declares
+ * the original extension so the file continues on to Next's normal
+ * TS/JSX compilation after our probe insertion, matching the `enforce: 'pre'`
+ * ordering used on the webpack side.
+ */
+function turbopackRulesValue(loaderPath: string): { rules: Record<string, unknown> } {
+  const rules: Record<string, unknown> = {};
+  for (const glob of TURBOPACK_RULE_GLOBS) {
+    rules[glob] = [
+      {
+        condition: { all: ['browser', { not: 'foreign' }] },
+        loaders: [{ loader: loaderPath, options: { target: 'browser' } }],
+        as: glob
+      },
+      {
+        condition: { all: [{ not: 'browser' }, { not: 'foreign' }] },
+        loaders: [{ loader: loaderPath, options: { target: 'node' } }],
+        as: glob
+      }
+    ];
+  }
+  return { rules };
+}
+
+/**
+ * The `turbopack` top-level key replaced `experimental.turbo` in Next.js
+ * 15.3 (the old key still works as an alias through 16, but new configs
+ * should use the new one). Below 15.3 only `experimental.turbo` is
+ * recognized, and before 13.0 Turbopack config didn't exist at all.
+ */
+export function turbopackConfigKey(majorVersion?: number, minorVersion?: number): 'turbopack' | 'experimental-turbo' | 'unsupported' {
+  if (majorVersion === undefined) {
+    // Unknown version (canary tag, workspace range, ...): assume current.
+    return 'turbopack';
+  }
+  if (majorVersion < 13) {
+    return 'unsupported';
+  }
+  if (majorVersion > 15) {
+    return 'turbopack';
+  }
+  if (majorVersion === 15) {
+    return (minorVersion ?? 3) >= 3 ? 'turbopack' : 'experimental-turbo';
+  }
+  return 'experimental-turbo';
+}
+
+function indentBlock(json: string, spaces: number): string {
+  const pad = ' '.repeat(spaces);
+  return json
+    .split('\n')
+    .map((line, i) => (i === 0 ? line : pad + line))
+    .join('\n');
+}
+
 export function nextConfigSnippet(loaderDir: string, profile: ProjectProfile): string {
   const loaderPath = path.join(loaderDir, 'webpack-loader.js').replace(/\\/g, '/');
   const ext = profile.configs.next ?? 'next.config.mjs';
   const isEsmConfig = ext.endsWith('.mjs') || ext.endsWith('.ts') || profile.moduleKind === 'esm';
+
+  const keyKind = turbopackConfigKey(profile.nextMajorVersion, profile.nextMinorVersion);
+  let turbopackField = '';
+  if (keyKind !== 'unsupported') {
+    const rulesJson = JSON.stringify(turbopackRulesValue(loaderPath), null, 2);
+    turbopackField =
+      keyKind === 'turbopack'
+        ? `  turbopack: ${indentBlock(rulesJson, 2)},\n`
+        : `  experimental: {\n    turbo: ${indentBlock(rulesJson, 4)}\n  },\n`;
+  }
+
   const body = `const nextConfig = {
-  webpack(config) {
+${turbopackField}  webpack(config) {
     config.module.rules.push({
       test: /\\.(js|jsx|ts|tsx)$/,
       exclude: /node_modules|\\.next/,

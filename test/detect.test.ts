@@ -198,6 +198,44 @@ describe('framework/strategy', () => {
     }
   });
 
+  it('also wires up Turbopack rules for Next.js, split by target via loader options', () => {
+    for (const fixture of ['next-pages', 'next-app']) {
+      const profile = detectProject(path.join(FIXTURES, fixture), fs as unknown as FsLike);
+      const strategy = selectStrategy(profile, CTX);
+      // Fixtures pin next@^14.1.0: pre-15.3, so the old experimental.turbo key applies.
+      assert.match(strategy.snippet ?? '', /experimental:\s*\{\s*turbo:/, fixture);
+      assert.match(strategy.snippet ?? '', /"target":\s*"browser"/, fixture);
+      assert.match(strategy.snippet ?? '', /"target":\s*"node"/, fixture);
+      assert.ok(
+        strategy.warnings.some((w) => /Turbopack/.test(w) && /this\.target/.test(w)),
+        fixture
+      );
+    }
+  });
+
+  it('uses the top-level turbopack key once next is 15.3+, and drops it entirely below 13', () => {
+    const base = {
+      '/w/next.config.mjs': 'export default {}',
+      '/w/app/page.tsx': 'export default function P() { return null }'
+    };
+
+    const modern = detectProject(
+      '/w',
+      virtualFs({ ...base, '/w/package.json': JSON.stringify({ dependencies: { next: '16.2.0', react: '18.0.0' } }) })
+    );
+    const modernSnippet = selectStrategy(modern, CTX).snippet ?? '';
+    assert.match(modernSnippet, /^const nextConfig = \{\s*\n\s*turbopack: \{/m, 'next 16 uses the top-level turbopack key');
+    assert.doesNotMatch(modernSnippet, /experimental:/);
+
+    const preTurbo = detectProject(
+      '/w',
+      virtualFs({ ...base, '/w/package.json': JSON.stringify({ dependencies: { next: '12.3.0', react: '18.0.0' } }) })
+    );
+    const preTurboSnippet = selectStrategy(preTurbo, CTX).snippet ?? '';
+    assert.doesNotMatch(preTurboSnippet, /turbopack|experimental/, 'next < 13 has no Turbopack config to emit');
+    assert.match(preTurboSnippet, /webpack\(config\)/, 'the webpack loader is still wired up');
+  });
+
   it('selects the --import hook for ESM Node and the --require hook for CJS Node', () => {
     const esm = selectStrategy(detectProject(path.join(FIXTURES, 'node-ts'), fs as unknown as FsLike), CTX);
     assert.equal(esm.kind, 'node-import-hook');

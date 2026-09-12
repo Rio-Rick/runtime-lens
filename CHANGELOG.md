@@ -4,6 +4,44 @@ All notable changes to Runtime Lens are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Turbopack support for Next.js.** The generated `next.config.*` snippet now wires the
+  instrumenting loader into `turbopack.rules` (or `experimental.turbo.rules` on Next.js
+  13.0–15.2) alongside the existing `webpack()` registration, so Runtime Lens works whether a
+  project runs `next dev` under webpack, `--turbopack`/`--turbo`, or the Turbopack-by-default
+  Next.js 16+. Because Turbopack's loader context doesn't implement `this.target`, the
+  client/server split is now passed explicitly through a `target` loader option (driven by
+  Turbopack's built-in `browser` / `not: 'browser'` rule conditions) instead of being read off
+  the loader context; the webpack path is unaffected and still uses `this.target`.
+- `ProjectProfile` now records the detected `next` major/minor version, used to pick between the
+  `turbopack` and `experimental.turbo` config keys (and to skip Turbopack config entirely below
+  Next.js 13, where it doesn't exist).
+
+### Fixed
+
+- **`Module not found` / "server relative imports are not implemented yet" under Turbopack.** The
+  Next.js loader used to import the runtime agent by its absolute filesystem path (the extension's
+  own install directory, or an OS-temp-dir file for the browser agent). Webpack resolves that
+  fine; Turbopack treats any specifier starting with `/` as a server-relative (public URL) import
+  and refuses to resolve it at all (no upstream fix planned:
+  https://github.com/vercel/next.js/issues/72575), and separately only resolves modules that live
+  inside the detected project root — which the extension's install directory and the OS temp dir
+  never are. The loader now mirrors the (non-secret) browser/node agent files into
+  `node_modules/.cache/runtime-lens/` inside the project and imports that copy through a real
+  relative specifier computed from the file being compiled. This resolves identically under plain
+  webpack, so nothing changes there.
+- **`Module not found: Can't resolve './core'` after the fix above.** Mirroring only
+  `node-agent.js` wasn't enough on its own: it `require()`s sibling files (`./core`,
+  `./node-transport`, which in turn pulls in `./ws-transport` and `../protocol` /
+  `../serialization/serializer`) that never got copied alongside it into
+  `node_modules/.cache/runtime-lens/`. `node-agent.ts` is now bundled with esbuild into a single,
+  dependency-free CommonJS file at build time (the same treatment `browser-agent.ts` already got
+  for the browser bundle), so the one file that gets mirrored is fully self-contained - there's no
+  sibling-file list to keep in sync as the agent's own internals change.
+
 ## [0.1.0] - 2026-09-02
 
 First working release. Everything below is implemented and covered by the test suite

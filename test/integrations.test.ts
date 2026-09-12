@@ -127,7 +127,12 @@ describe('integrations/webpack-loader (Next.js)', () => {
     error?: unknown;
   }
 
-  function runLoader(source: string, resourcePath: string, options: Record<string, unknown>): LoaderCalls {
+  function runLoader(
+    source: string,
+    resourcePath: string,
+    options: Record<string, unknown>,
+    contextExtra: Record<string, unknown> = {}
+  ): LoaderCalls {
     const calls: LoaderCalls = {};
     const context = {
       resourcePath,
@@ -141,7 +146,8 @@ describe('integrations/webpack-loader (Next.js)', () => {
         calls.error = error;
         calls.code = code;
         calls.map = map;
-      }
+      },
+      ...contextExtra
     };
     webpackLoader.call(context as never, source, undefined);
     return calls;
@@ -177,6 +183,76 @@ describe('integrations/webpack-loader (Next.js)', () => {
     });
     assert.equal(result.error, null, 'the loader must not surface an error to webpack');
     assert.equal(result.code, 'const = = = broken(((;\n');
+  });
+
+  describe('Turbopack (no this.target on the loader context)', () => {
+    it('picks the browser agent from options.target when the context has no target at all', () => {
+      const result = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN, target: 'browser' });
+      assert.ok(result.code);
+      assert.match(result.code, /runtime-lens[\\/]browser-agent-/, 'browser pass should bundle the browser agent');
+    });
+
+    it('picks the node agent from options.target when the context has no target at all', () => {
+      const result = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN, target: 'node' });
+      assert.ok(result.code);
+      assert.match(result.code, /runtime-lens[\\/]node-agent\.js/, 'server pass should import the node agent');
+    });
+
+    it('still honours a real webpack this.target when no options.target is supplied', () => {
+      const web = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN }, { target: 'web' });
+      assert.match(web.code ?? '', /runtime-lens[\\/]browser-agent-/);
+      const node = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN }, { target: 'node' });
+      assert.match(node.code ?? '', /runtime-lens[\\/]node-agent\.js/);
+    });
+
+    it('never emits an absolute or server-relative import specifier for the agent module', () => {
+      // Turbopack treats any specifier starting with '/' as a "server relative
+      // import" and refuses to resolve it (no fix planned:
+      // https://github.com/vercel/next.js/issues/72575), and only resolves
+      // modules that live inside the detected project root. The agent must
+      // therefore be reached through a real relative import into the
+      // project's own node_modules/.cache, never an absolute path.
+      for (const target of ['browser', 'node']) {
+        const result = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN, target });
+        assert.ok(result.code, target);
+        const importMatch = result.code!.match(/from "([^"]+)"/);
+        assert.ok(importMatch, `expected an import statement, got: ${result.code}`);
+        const specifier = importMatch![1];
+        assert.ok(specifier.startsWith('.'), `${target}: specifier must be relative, got ${specifier}`);
+        assert.ok(!specifier.startsWith('/'), `${target}: specifier must not be absolute/server-relative, got ${specifier}`);
+        assert.match(specifier, /node_modules\/\.cache\/runtime-lens\//, target);
+      }
+    });
+
+    it('caches the agent under the project root found by walking up from the file, inside node_modules/.cache', () => {
+      const result = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN, target: 'node' });
+      const cached = path.join(FIXTURES, 'next-pages', 'node_modules', '.cache', 'runtime-lens', 'node-agent.js');
+      assert.ok(fs.existsSync(cached), `expected ${cached} to have been written`);
+      assert.equal(fs.readFileSync(cached, 'utf8').length > 0, true);
+      assert.match(result.code ?? '', /runtime-lens[\\/]node-agent\.js/);
+    });
+
+    it('mirrors a self-contained node-agent with no relative requires left dangling', () => {
+      // Regression test for "Module not found: Can't resolve './core'": the
+      // cache copy is the *only* file that gets written, so if node-agent.js
+      // still required sibling files by relative path (`./core`,
+      // `./node-transport`, ...) instead of bundling them in, this would
+      // 404 the moment the bundler tried to follow those imports out of
+      // node_modules/.cache/runtime-lens/, which never got copies of them.
+      runLoader(pageSource, pageFile, { port: 7777, token: TOKEN, target: 'node' });
+      const cached = path.join(FIXTURES, 'next-pages', 'node_modules', '.cache', 'runtime-lens', 'node-agent.js');
+      const cachedSource = fs.readFileSync(cached, 'utf8');
+      assert.doesNotMatch(cachedSource, /require\(["']\.[^"']*["']\)/, 'no relative require should remain in the mirrored file');
+      // And it must actually be requirable in total isolation - no siblings present.
+      const isolated = path.join(FIXTURES, 'next-pages', 'node_modules', '.cache', 'runtime-lens-isolated-check');
+      fs.mkdirSync(isolated, { recursive: true });
+      const isolatedCopy = path.join(isolated, 'node-agent.js');
+      fs.copyFileSync(cached, isolatedCopy);
+      delete require.cache[require.resolve(isolatedCopy)];
+      const agent = require(isolatedCopy) as Record<string, unknown>;
+      assert.equal(typeof agent, 'object');
+      fs.rmSync(isolated, { recursive: true, force: true });
+    });
   });
 });
 

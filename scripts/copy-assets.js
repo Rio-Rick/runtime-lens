@@ -63,3 +63,32 @@ execFileSync(
   { stdio: 'inherit', cwd: root }
 );
 console.log(`bundled ${path.relative(root, entry)} -> ${path.relative(root, target)}`);
+
+// 5. Bundle the node agent to a single, dependency-free CJS file.
+//
+// The Next.js loader mirrors this exact file into the *user's* project
+// (`node_modules/.cache/runtime-lens/`, see webpack-loader.ts) so it can be
+// reached through a relative import Turbopack will actually resolve. If it
+// were left as tsc's plain multi-file output, that copy would `require('./core')`
+// / `require('./node-transport')` and 404 on siblings that never got copied
+// alongside it. Bundling collapses the whole agent/core/protocol/serialization
+// graph into one file, so there is nothing left to go missing - and it stays
+// correct automatically as that graph changes, with no file list to maintain.
+const nodeEntry = path.join(root, 'src', 'agent', 'node-agent.ts');
+const nodeTarget = path.join(out, 'agent', 'node-agent.js');
+execFileSync(
+  esbuild,
+  [
+    nodeEntry,
+    '--bundle',
+    '--format=cjs',
+    '--platform=node',
+    '--target=node18',
+    '--external:node:http',
+    '--sourcemap',
+    '--legal-comments=none',
+    `--outfile=${nodeTarget}`
+  ],
+  { stdio: 'inherit', cwd: root }
+);
+console.log(`bundled ${path.relative(root, nodeEntry)} -> ${path.relative(root, nodeTarget)}`);
