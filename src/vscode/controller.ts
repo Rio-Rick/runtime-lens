@@ -12,6 +12,7 @@ import { readConfig, updateConfig, type RuntimeLensConfig } from './config';
 import { DecorationManager } from './decorations';
 import { RuntimeDiagnostics } from './diagnostics';
 import { RuntimeExplorerProvider, type ExplorerNode } from './explorer';
+import { buildExportPayload, defaultExportFileName, exportPayloadToJson } from './export-log';
 import { HOVER_LANGUAGES, RuntimeHoverProvider } from './hover';
 import { eventText, type RenderConfig } from './render';
 import { StatusBar } from './status-bar';
@@ -181,7 +182,15 @@ export class RuntimeLensController implements vscode.Disposable {
     });
     server.emitter.on('protocol-error', ({ code, message }) => {
       logger.warn(`protocol error [${code}]: ${message}`);
-      if (code === 'bad-version') {
+      // `too-large`: a whole batch of already-captured events just got
+      // rejected and silently thrown away — the user needs to know, not
+      // just find it in the output channel. This self-clears the moment
+      // the next accepted batch calls `setState('active', ...)` above, so
+      // it reads as "that one flush had a problem" rather than getting
+      // stuck. `bad-token`/`bad-message`/`internal` stay log-only: they're
+      // either expected noise (a stale process reconnecting with a token
+      // from before a restart) or not something the user can act on.
+      if (code === 'bad-version' || code === 'too-large') {
         this.statusBar.setError(message);
       }
     });
@@ -264,6 +273,19 @@ export class RuntimeLensController implements vscode.Disposable {
     this.diagnostics.clear();
     this.decorations.refresh();
     this.statusBar.setCounters(this.server?.listSessions().length ?? 0, 0);
+    // The `× N` execution count on each probe is computed in the *agent's*
+    // process, not derived from the history we just cleared, so it has to be
+    // reset there too or the next event just resumes the old count.
+    this.server?.broadcastReset();
+    const unreachable = this.server?.sessionsUnreachableForReset() ?? [];
+    if (unreachable.length > 0) {
+      const labels = unreachable.map((s) => s.label).join(', ');
+      logger.warn(`clear: ${unreachable.length} HTTP-connected session(s) can't be live-reset: ${labels}`);
+      void vscode.window.showWarningMessage(
+        `Runtime Lens: cleared. ${unreachable.length} session(s) connected over HTTP (${labels}) can't receive a ` +
+          'live reset — their execution counts will keep going until that process restarts.'
+      );
+    }
     logger.info('logs cleared');
   }
 
@@ -343,11 +365,89 @@ export class RuntimeLensController implements vscode.Disposable {
     void vscode.window.showInformationMessage('Runtime Lens: value copied.');
   }
 
+  async copyEventJson(node: ExplorerNode | undefined): Promise<void> {
+    if (!node || node.kind !== 'event') {
+      return;
+    }
+    const { stored } = node;
+    const payload = {
+      protocol: PROTOCOL_VERSION,
+      key: stored.key,
+      sessionId: stored.sessionId,
+      remapped: stored.remapped,
+      location: stored.loc,
+      event: stored.event
+    };
+    await vscode.env.clipboard.writeText(JSON.stringify(payload, null, 2));
+    void vscode.window.showInformationMessage('Runtime Lens: event JSON copied.');
+  }
+
+  /**
+   * Forcibly end one session — closes its live connection if it still has
+   * one, or just clears a stale entry (a crashed process that never sent
+   * `bye`). A still-running agent reconnects on its own next flush, so this
+   * is a "clear this from my view" action, not a way to silence a session
+   * for good.
+   */
+  async disconnectSession(node: ExplorerNode | undefined): Promise<void> {
+    if (!node || node.kind !== 'session') {
+      return;
+    }
+    const { sessionId, label } = node.session;
+    const removed = this.server?.disconnectSession(sessionId) ?? false;
+    if (removed) {
+      void vscode.window.showInformationMessage(`Runtime Lens: disconnected "${label}".`);
+    }
+  }
+
   async revealEvent(node: ExplorerNode | undefined): Promise<void> {
     if (!node || node.kind !== 'event') {
       return;
     }
     await this.revealSource(node.stored.loc.file, node.stored.loc.line);
+  }
+
+  /**
+   * Save the currently-visible (filter-respecting) captured events to a JSON
+   * file the user picks — a transcript that's easy to attach to a bug
+   * report, paste into a PR description, or diff against a later run. Runs
+   * against everything the bounded history still holds, not just the 500
+   * events the tree view renders at once.
+   */
+  async exportLog(): Promise<void> {
+    const events = this.store.list(this.store.stats().capacity);
+    if (events.length === 0) {
+      void vscode.window.showInformationMessage(
+        this.store.filter.query || this.store.filter.levels || this.store.filter.file
+          ? 'Runtime Lens: no captured events match the current filter.'
+          : 'Runtime Lens: no captured events to export yet.'
+      );
+      return;
+    }
+    const payload = buildExportPayload(events, { filter: this.store.filter });
+    const suggestedDir = this.profile?.root ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionPath;
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(path.join(suggestedDir, defaultExportFileName())),
+      filters: { JSON: ['json'] },
+      saveLabel: 'Export Runtime Lens Log'
+    });
+    if (!uri) {
+      return;
+    }
+    try {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(exportPayloadToJson(payload), 'utf8'));
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Runtime Lens could not write the export: ${(err as Error).message}`);
+      return;
+    }
+    logger.info(`exported ${payload.totalEvents} event(s) to ${uri.fsPath}`);
+    void vscode.window
+      .showInformationMessage(`Runtime Lens: exported ${payload.totalEvents} event(s) to ${path.basename(uri.fsPath)}.`, 'Open')
+      .then((choice) => {
+        if (choice === 'Open') {
+          void vscode.workspace.openTextDocument(uri).then((doc) => vscode.window.showTextDocument(doc, { preview: true }));
+        }
+      });
   }
 
   /** Human-readable diagnostics dump; also the `Show Diagnostics` command. */

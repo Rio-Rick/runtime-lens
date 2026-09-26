@@ -199,6 +199,25 @@ describe('protocol', () => {
     }
   });
 
+  it('validates nested error properties and rejects non-finite batch counters', () => {
+    assert.equal(
+      validateSerializedValue({ k: 'error', name: 'Error', message: 'boom', props: { nested: { bad: true } } }),
+      false
+    );
+    assert.equal(
+      validateSerializedValue({
+        k: 'error',
+        name: 'Error',
+        message: 'boom',
+        props: { nested: { k: 'array', entries: [{ k: 'number', v: 1 }], length: 1 } }
+      }),
+      true
+    );
+
+    const badDropped = validateClientMessage({ t: 'batch', v: V, sessionId: 's', dropped: Infinity, events: [] });
+    assert.equal(badDropped.ok, false);
+  });
+
   it('guards against deeply nested value bombs', () => {
     let bomb: Record<string, unknown> = { k: 'null' };
     for (let i = 0; i < 64; i++) {
@@ -294,6 +313,50 @@ describe('protocol: server -> agent messages', () => {
     assert.equal(!res.ok && res.code, 'bad-version');
   });
 
+  it('accepts an optional maxPayloadBytes on a config push and omits it when absent', () => {
+    const withLimit = validateServerMessage({
+      t: 'config',
+      v: V,
+      captureConsole: true,
+      captureExpressions: true,
+      paused: false,
+      objectDepth: 3,
+      maxPayloadBytes: 262_144
+    });
+    assert.equal(withLimit.ok, true);
+    assert.equal(withLimit.ok && withLimit.value.t === 'config' && withLimit.value.maxPayloadBytes, 262_144);
+
+    const withoutLimit = validateServerMessage({
+      t: 'config',
+      v: V,
+      captureConsole: true,
+      captureExpressions: true,
+      paused: false,
+      objectDepth: 3
+    });
+    assert.equal(withoutLimit.ok, true);
+    assert.equal(
+      withoutLimit.ok && withoutLimit.value.t === 'config' && 'maxPayloadBytes' in withoutLimit.value,
+      false,
+      'absent rather than present-but-undefined, so it round-trips cleanly through JSON'
+    );
+  });
+
+  it('rejects a non-positive or non-numeric maxPayloadBytes on a config push', () => {
+    for (const bad of [0, -1, Number.NaN, 'lots']) {
+      const res = validateServerMessage({
+        t: 'config',
+        v: V,
+        captureConsole: true,
+        captureExpressions: true,
+        paused: false,
+        objectDepth: 3,
+        maxPayloadBytes: bad
+      });
+      assert.equal(!res.ok && res.code, 'bad-message', `expected ${JSON.stringify(bad)} to be rejected`);
+    }
+  });
+
   it('parseServerMessage parses JSON and rejects garbage', () => {
     const good = parseServerMessage(
       JSON.stringify({ t: 'config', v: V, captureConsole: true, captureExpressions: true, paused: false, objectDepth: 10 })
@@ -302,5 +365,22 @@ describe('protocol: server -> agent messages', () => {
 
     const bad = parseServerMessage('{ not json');
     assert.equal(!bad.ok && bad.code, 'bad-message');
+  });
+
+  it('validates a reset push (no fields beyond t/v)', () => {
+    const res = validateServerMessage({ t: 'reset', v: V });
+    assert.equal(res.ok, true);
+    assert.deepEqual(res.ok && res.value, { t: 'reset', v: V });
+  });
+
+  it('rejects a reset push with an incompatible protocol version', () => {
+    const res = validateServerMessage({ t: 'reset', v: '2.0.0' });
+    assert.equal(!res.ok && res.code, 'bad-version');
+  });
+
+  it('parseServerMessage round-trips a reset push', () => {
+    const parsed = parseServerMessage(JSON.stringify({ t: 'reset', v: V }));
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.ok && parsed.value.t, 'reset');
   });
 });

@@ -106,6 +106,21 @@
         "command": "runtimeLens.copyEventValue",
         "title": "Runtime Lens: Copy Event Value",
         "icon": "$(copy)"
+      },
+      {
+        "command": "runtimeLens.copyEventJson",
+        "title": "Runtime Lens: Copy Event as JSON",
+        "icon": "$(json)"
+      },
+      {
+        "command": "runtimeLens.disconnectSession",
+        "title": "Runtime Lens: Disconnect Session",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "runtimeLens.exportLog",
+        "title": "Runtime Lens: Export Log",
+        "icon": "$(export)"
       }
     ],
     "configuration": {
@@ -224,6 +239,11 @@
           "command": "runtimeLens.showRuntimeExplorer",
           "when": "view == runtimeLens.explorer",
           "group": "navigation@5"
+        },
+        {
+          "command": "runtimeLens.exportLog",
+          "when": "view == runtimeLens.explorer",
+          "group": "navigation@6"
         }
       ],
       "view/item/context": [
@@ -236,6 +256,16 @@
           "command": "runtimeLens.copyEventValue",
           "when": "view == runtimeLens.explorer && viewItem == runtimeLensEvent",
           "group": "inline@2"
+        },
+        {
+          "command": "runtimeLens.copyEventJson",
+          "when": "view == runtimeLens.explorer && viewItem == runtimeLensEvent",
+          "group": "inline@3"
+        },
+        {
+          "command": "runtimeLens.disconnectSession",
+          "when": "view == runtimeLens.explorer && viewItem == runtimeLensSession",
+          "group": "inline@1"
         }
       ]
     }

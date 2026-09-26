@@ -15,7 +15,10 @@ export const COMMAND_IDS = {
   setFilter: 'runtimeLens.setFilter',
   toggleFollow: 'runtimeLens.toggleFollow',
   revealEvent: 'runtimeLens.revealEvent',
-  copyEventValue: 'runtimeLens.copyEventValue'
+  copyEventValue: 'runtimeLens.copyEventValue',
+  copyEventJson: 'runtimeLens.copyEventJson',
+  disconnectSession: 'runtimeLens.disconnectSession',
+  exportLog: 'runtimeLens.exportLog'
 } as const;
 
 export type CommandId = (typeof COMMAND_IDS)[keyof typeof COMMAND_IDS];
@@ -42,7 +45,10 @@ export function registerCommands(
     [COMMAND_IDS.setFilter, () => controller.setFilter()],
     [COMMAND_IDS.toggleFollow, () => controller.toggleFollow()],
     [COMMAND_IDS.revealEvent, (node?: unknown) => controller.revealEvent(node as ExplorerNode | undefined)],
-    [COMMAND_IDS.copyEventValue, (node?: unknown) => controller.copyEventValue(node as ExplorerNode | undefined)]
+    [COMMAND_IDS.copyEventValue, (node?: unknown) => controller.copyEventValue(node as ExplorerNode | undefined)],
+    [COMMAND_IDS.copyEventJson, (node?: unknown) => controller.copyEventJson(node as ExplorerNode | undefined)],
+    [COMMAND_IDS.disconnectSession, (node?: unknown) => controller.disconnectSession(node as ExplorerNode | undefined)],
+    [COMMAND_IDS.exportLog, () => controller.exportLog()]
   ]);
 
   for (const [id, handler] of handlers) {

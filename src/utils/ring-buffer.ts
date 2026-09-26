@@ -24,16 +24,18 @@ export class RingBuffer<T> implements Iterable<T> {
     return this.droppedCount;
   }
 
-  push(item: T): void {
+  push(item: T): T | undefined {
     const index = (this.head + this.count) % this.capacityValue;
     if (this.count === this.capacityValue) {
+      const evicted = this.items[index] as T;
       this.items[index] = item;
       this.head = (this.head + 1) % this.capacityValue;
       this.droppedCount++;
-    } else {
-      this.items[index] = item;
-      this.count++;
+      return evicted;
     }
+    this.items[index] = item;
+    this.count++;
+    return undefined;
   }
 
   /** Remove and return up to `n` oldest items. */

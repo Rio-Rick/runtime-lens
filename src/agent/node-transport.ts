@@ -53,6 +53,13 @@ export function createHttpTransport(endpoint: NodeEndpoint): AgentTransport {
       req.on('error', () => {
         /* editor closed: stay silent, keep the app running */
       });
+      // A keep-alive socket is an active handle that would otherwise hold
+      // the host process open indefinitely just to keep this connection
+      // warm — the same "never hold the process open" bug fixed in
+      // ws-transport.ts. unref() lets the host exit normally once its own
+      // work is done; the socket still delivers whatever was already
+      // written to it.
+      req.on('socket', (sock) => sock.unref());
       req.end(json);
     } catch {
       broken = true;

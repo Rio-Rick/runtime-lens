@@ -101,6 +101,38 @@ describe('agent/core (console interception)', () => {
     assert.equal((calls[2][1][0] as Error).message, 'bad', 'the original object identity is preserved');
   });
 
+  it('uses the current console method when the application patches it after agent startup', () => {
+    const transport = new FakeTransport();
+    const original = globalThis.console;
+    const firstCalls: unknown[][] = [];
+    const secondCalls: unknown[][] = [];
+    try {
+      (globalThis as { console: unknown }).console = {
+        log: (...args: unknown[]) => firstCalls.push(args),
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+        debug: () => undefined,
+        table: () => undefined
+      };
+      const agent = makeAgent(transport);
+      (globalThis as { console: unknown }).console = {
+        log: (...args: unknown[]) => secondCalls.push(args),
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+        debug: () => undefined,
+        table: () => undefined
+      };
+      agent.c('log', 'patched', '/a.ts', 1, 0, ['hello']);
+      agent.dispose();
+    } finally {
+      (globalThis as { console: unknown }).console = original;
+    }
+    assert.equal(firstCalls.length, 0);
+    assert.deepEqual(secondCalls, [['hello']]);
+  });
+
   it('captures every level with serialized args and original locations', () => {
     const transport = new FakeTransport();
     withCapturedConsole(() => {
@@ -212,6 +244,78 @@ describe('agent/core (console interception)', () => {
       assert.deepEqual(sizes, [10, 10, 5], `unexpected batch sizes: ${sizes.join(',')}`);
       agent.dispose();
     });
+  });
+
+  it('also splits a batch by byte size even when under maxBatchEvents, so one oversized batch cannot get the whole thing rejected', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      // Each event's single string arg serializes to roughly 1KB; a 3KB
+      // byte budget should therefore fit only a couple of events per batch
+      // even though maxBatchEvents (1000) never comes close to limiting
+      // anything on its own.
+      const agent = makeAgent(transport, { maxBatchEvents: 1000, maxBufferedEvents: 1000, maxBatchBytes: 3 * 1024 });
+      const big = 'x'.repeat(1000);
+      for (let i = 0; i < 20; i++) {
+        agent.c('log', 'p', '/a.ts', 1, 0, [big]);
+      }
+      agent.flush();
+      const batches = transport.batches();
+      assert.ok(batches.length > 1, 'a 20KB+ buffer must not go out as a single batch under a 3KB budget');
+      for (const batch of batches) {
+        const size = Buffer.byteLength(JSON.stringify(batch), 'utf8');
+        assert.ok(size <= 4 * 1024, `batch of ${size} bytes should stay close to the ~3KB budget (got ${size})`);
+      }
+      const total = batches.reduce((n, b) => n + b.events.length, 0);
+      assert.equal(total, 20, 'every event is still delivered, just spread across more batches');
+      agent.dispose();
+    });
+  });
+
+  it('still sends a single event alone when it alone exceeds maxBatchBytes, rather than getting stuck', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport, { maxBatchEvents: 1000, maxBufferedEvents: 1000, maxBatchBytes: 10 });
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['this alone is already well over 10 bytes']);
+      agent.c('log', 'p2', '/a.ts', 2, 0, ['so is this second one']);
+      assert.doesNotThrow(() => agent.flush());
+      const sizes = transport.batches().map((b) => b.events.length);
+      assert.deepEqual(sizes, [1, 1], 'each oversized event ships alone instead of being dropped or blocking the other');
+      agent.dispose();
+    });
+  });
+
+  it('applyConfig narrows maxBatchBytes from a pushed maxPayloadBytes, with headroom below the raw limit', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport, { maxBatchEvents: 1000, maxBufferedEvents: 1000, maxBatchBytes: 1_000_000 });
+      const big = 'x'.repeat(1000);
+      // 4000 bytes / 0.75 headroom => ~3000 usable, so 20 * ~1KB events must split into more than one batch.
+      agent.applyConfig({ captureConsole: true, captureExpressions: true, paused: false, objectDepth: 3, maxPayloadBytes: 4000 });
+      for (let i = 0; i < 20; i++) {
+        agent.c('log', 'p', '/a.ts', 1, 0, [big]);
+      }
+      agent.flush();
+      const batches = transport.batches();
+      assert.ok(batches.length > 1, 'the pushed maxPayloadBytes should have tightened batching, not left it at the 1MB override');
+      for (const batch of batches) {
+        assert.ok(Buffer.byteLength(JSON.stringify(batch), 'utf8') <= 4000, 'must stay under the server-declared limit, not just the pre-push default');
+      }
+      agent.dispose();
+    });
+  });
+
+  it('ignores a non-positive or missing maxPayloadBytes on applyConfig instead of zeroing the batch budget', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport, { maxBatchBytes: 12345 });
+      agent.applyConfig({ captureConsole: true, captureExpressions: true, paused: false, objectDepth: 3, maxPayloadBytes: 0 });
+      agent.applyConfig({ captureConsole: true, captureExpressions: true, paused: false, objectDepth: 3, maxPayloadBytes: -5 });
+      agent.applyConfig({ captureConsole: true, captureExpressions: true, paused: false, objectDepth: 3 });
+      agent.c('log', 'p', '/a.ts', 1, 0, ['still here']);
+      agent.flush();
+      agent.dispose();
+    });
+    assert.equal(transport.events().length, 1, 'capture must still work; a bad push must not disable batching');
   });
 
   it('flushes on a timer without being asked', async () => {
@@ -343,6 +447,67 @@ describe('agent/core (console interception)', () => {
     assert.doesNotThrow(() => transport.receive('not even an object'));
     assert.doesNotThrow(() => transport.onMessage?.('{ not json'));
     agent.dispose();
+  });
+
+  it('resetCounts() makes the next capture of an already-seen probe start back at count 1', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport);
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['a']); // count 1
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['b']); // count 2
+      agent.resetCounts();
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['c']); // should be count 1 again, not 3
+      agent.flush();
+      agent.dispose();
+    });
+    const counts = (transport.events() as LogEvent[]).map((e) => e.count);
+    assert.deepEqual(counts, [1, 2, 1]);
+  });
+
+  it('a reset push delivered through transport.onMessage reaches the agent end-to-end', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport);
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['a']);
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['b']);
+      transport.receive({ t: 'reset', v: PROTOCOL_VERSION });
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['c']);
+      agent.flush();
+      agent.dispose();
+    });
+    const counts = (transport.events() as LogEvent[]).map((e) => e.count);
+    assert.deepEqual(counts, [1, 2, 1]);
+  });
+
+  it('resetCounts() does not touch seq, which must stay monotonic', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport);
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['a']);
+      agent.resetCounts();
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['b']);
+      agent.flush();
+      agent.dispose();
+    });
+    const seqs = (transport.events() as LogEvent[]).map((e) => e.seq);
+    assert.deepEqual(seqs, [0, 1]);
+  });
+
+  it('a reset push resets counters across different probes too', () => {
+    const transport = new FakeTransport();
+    withCapturedConsole(() => {
+      const agent = makeAgent(transport);
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['a']);
+      agent.c('log', 'p2', '/a.ts', 2, 0, ['x']);
+      agent.c('log', 'p2', '/a.ts', 2, 0, ['y']);
+      transport.receive({ t: 'reset', v: PROTOCOL_VERSION });
+      agent.c('log', 'p1', '/a.ts', 1, 0, ['a']);
+      agent.c('log', 'p2', '/a.ts', 2, 0, ['x']);
+      agent.flush();
+      agent.dispose();
+    });
+    const counts = (transport.events() as LogEvent[]).map((e) => e.count);
+    assert.deepEqual(counts, [1, 1, 2, 1, 1]);
   });
 
   it('sends a bye and closes the transport on dispose', () => {

@@ -162,17 +162,211 @@ describe('runtime/server (WebSocket + HTTP ingest)', () => {
     ws.close();
   });
 
+  it('requires a WebSocket hello before accepting batches', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');
+    const reply = once<string>((cb) => ws.on('message', (d) => cb(d.toString())), 4000, 'error reply');
+    ws.send(JSON.stringify({ t: 'batch', v: V, sessionId: 'unauthenticated', events: [] }));
+    const parsed = JSON.parse(await reply) as { code: string; message: string };
+    assert.equal(parsed.code, 'bad-message');
+    assert.match(parsed.message, /hello is required/);
+    assert.equal(server.listSessions().length, 0);
+    ws.close();
+  });
+
+  it('binds every WebSocket message to the session authenticated by that socket', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');
+    ws.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 'bound', runtime: 'node', label: 'bound' }));
+    await once<string>((cb) => ws.on('message', (d) => cb(d.toString())), 4000, 'config');
+
+    const reply = once<string>((cb) => ws.on('message', (d) => cb(d.toString())), 4000, 'error reply');
+    ws.send(JSON.stringify({ t: 'batch', v: V, sessionId: 'other-session', events: [logEvent(1)] }));
+    const parsed = JSON.parse(await reply) as { code: string; message: string };
+    assert.equal(parsed.code, 'bad-message');
+    assert.match(parsed.message, /sessionId does not match/);
+    assert.equal(server.listSessions().find((s) => s.sessionId === 'bound')?.eventCount, 0);
+    assert.equal(server.listSessions().some((s) => s.sessionId === 'other-session'), false);
+    ws.close();
+  });
+
+  it('replaces a still-open connection when a new hello arrives for the same sessionId, without racing the old close', async () => {
+    // A reconnect (e.g. ws-transport.ts after a dropped connection) sends a
+    // fresh `hello` for the same sessionId on a brand-new socket, possibly
+    // before the old socket has noticed it's dead. The server must hand the
+    // session to the new socket atomically rather than waiting for the old
+    // one's `close` event, which could otherwise fire *after* the new hello
+    // and incorrectly evict the session the new socket just (re)registered.
+    const a = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => a.on('open', () => cb()), 4000, 'A open');
+    const aOpened = once<{ sessionId: string }>((cb) => server.emitter.on('session-open', cb), 4000, 'A session-open');
+    a.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 'reconnecting', runtime: 'node', label: 'a' }));
+    await aOpened;
+    assert.equal(server.listSessions().length, 1);
+
+    let aCloseCode: number | undefined;
+    const aClientClosed = new Promise<void>((res) => {
+      a.on('close', (code) => {
+        aCloseCode = code;
+        res();
+      });
+    });
+
+    const b = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => b.on('open', () => cb()), 4000, 'B open');
+
+    const bOpened = once<{ sessionId: string; label: string }>((cb) => server.emitter.on('session-open', cb), 4000, 'B session-open');
+    const oldClosed = once<{ sessionId: string; reason?: string }>((cb) => server.emitter.on('session-close', cb), 4000, 'old session-close');
+    // Sent without waiting for A to close first — that's the race.
+    b.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 'reconnecting', runtime: 'node', label: 'b' }));
+
+    const bSession = await bOpened;
+    assert.equal(bSession.label, 'b');
+    const closeEvent = await oldClosed;
+    assert.equal(closeEvent.reason, 'replaced');
+    await aClientClosed;
+    assert.equal(aCloseCode, 1000);
+
+    // Exactly one session survives, and it's B's — not duplicated, not orphaned.
+    assert.equal(server.listSessions().length, 1);
+    assert.equal(server.listSessions()[0].sessionId, 'reconnecting');
+    assert.equal(server.listSessions()[0].label, 'b');
+
+    // The new connection is fully live: a batch on it is accepted normally.
+    const received = once<{ events: RuntimeEvent[] }>((cb) => server.emitter.on('events', cb), 4000, 'events on B');
+    b.send(JSON.stringify({ t: 'batch', v: V, sessionId: 'reconnecting', events: [logEvent(0)] }));
+    await received;
+    assert.equal(server.listSessions()[0].eventCount, 1);
+
+    b.close();
+  });
+
+  it('disconnectSession closes a live WebSocket session and removes it from the list', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');
+    const opened = once<{ sessionId: string }>((cb) => server.emitter.on('session-open', cb), 4000, 'session-open');
+    ws.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 'zombie', runtime: 'node', label: 'zombie proc' }));
+    await opened;
+    assert.equal(server.listSessions().length, 1);
+
+    let closeCode: number | undefined;
+    let closeReason: string | undefined;
+    const clientClosed = new Promise<void>((res) => {
+      ws.on('close', (code, reason) => {
+        closeCode = code;
+        closeReason = reason.toString();
+        res();
+      });
+    });
+    const serverClosed = once<{ sessionId: string; reason?: string }>(
+      (cb) => server.emitter.on('session-close', cb),
+      4000,
+      'session-close'
+    );
+
+    const result = server.disconnectSession('zombie');
+
+    assert.equal(result, true, 'a known session should report as disconnected');
+    const closeEvent = await serverClosed;
+    assert.equal(closeEvent.sessionId, 'zombie');
+    assert.equal(closeEvent.reason, 'disconnected-by-user');
+    await clientClosed;
+    assert.equal(closeCode, 1000);
+    assert.equal(closeReason, 'disconnected-by-user');
+    assert.equal(server.listSessions().length, 0);
+  });
+
+  it('disconnectSession clears a stale HTTP-only session with no live socket to close', async () => {
+    const res = await post(
+      port,
+      JSON.stringify({ t: 'hello', v: V, token, sessionId: 'http-zombie', runtime: 'node', label: 'http zombie' }),
+      { 'x-runtime-lens-token': token }
+    );
+    assert.equal(res.status, 200);
+    assert.equal(server.listSessions().some((s) => s.sessionId === 'http-zombie'), true);
+
+    // Nothing to close on the wire, but the stale entry still goes away.
+    assert.doesNotThrow(() => {
+      const removed = server.disconnectSession('http-zombie');
+      assert.equal(removed, true);
+    });
+    assert.equal(server.listSessions().some((s) => s.sessionId === 'http-zombie'), false);
+  });
+
+  it('disconnectSession is a no-op for an unknown sessionId', () => {
+    assert.equal(server.disconnectSession('never-existed'), false);
+  });
+
   it('pushes the current capture config to a connected agent', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
     await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');
     const message = once<string>((cb) => ws.on('message', (data) => cb(data.toString())), 4000, 'config');
     ws.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 's-cfg', runtime: 'node', label: 'cfg' }));
     const raw = await message;
-    const config = JSON.parse(raw) as { t: string; paused: boolean; objectDepth: number; captureExpressions: boolean };
+    const config = JSON.parse(raw) as {
+      t: string;
+      paused: boolean;
+      objectDepth: number;
+      captureExpressions: boolean;
+      maxPayloadBytes: number;
+    };
     assert.equal(config.t, 'config');
     assert.equal(config.paused, true);
     assert.equal(config.captureExpressions, false);
     assert.equal(config.objectDepth, 7);
+    // So the agent can size its own batches against the server's *real*
+    // configured limit instead of guessing (see agent/core.ts maxBatchBytes).
+    assert.equal(config.maxPayloadBytes, 8 * 1024);
+    ws.close();
+  });
+
+  it('broadcastConfig also carries the current maxPayloadBytes to every connected agent', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');
+    ws.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 's-cfg2', runtime: 'node', label: 'cfg2' }));
+    await once<string>((cb) => ws.on('message', (data) => cb(data.toString())), 4000, "hello's config ack"); // drain it
+
+    const message = once<string>((cb) => ws.on('message', (data) => cb(data.toString())), 4000, 'broadcast config');
+    server.broadcastConfig();
+    const raw = await message;
+    const config = JSON.parse(raw) as { t: string; maxPayloadBytes: number };
+    assert.equal(config.t, 'config');
+    assert.equal(config.maxPayloadBytes, 8 * 1024);
+    ws.close();
+  });
+
+  it('broadcastReset pushes a reset message to every connected agent', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');
+    ws.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 's-reset', runtime: 'node', label: 'reset-me' }));
+    // Drain the config push every hello triggers before listening for the reset.
+    await once<string>((cb) => ws.on('message', (data) => cb(data.toString())), 4000, 'config');
+
+    const message = once<string>((cb) => ws.on('message', (data) => cb(data.toString())), 4000, 'reset');
+    server.broadcastReset();
+    const raw = await message;
+    assert.deepEqual(JSON.parse(raw), { t: 'reset', v: V });
+    ws.close();
+  });
+
+  it('sessionsUnreachableForReset reports HTTP-transport sessions but not WebSocket ones', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');
+    const wsOpened = once<{ sessionId: string }>((cb) => server.emitter.on('session-open', cb), 4000, 'ws session-open');
+    ws.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 's-ws', runtime: 'node', label: 'ws session' }));
+    await wsOpened;
+
+    // A batch posted over plain HTTP with no prior `hello` opens an
+    // HTTP-transport session on the fly (see `ingest`'s 'batch' case).
+    const httpOpened = once<{ sessionId: string }>((cb) => server.emitter.on('session-open', cb), 4000, 'http session-open');
+    const batch = { t: 'batch', v: V, sessionId: 's-http', events: [logEvent(1)] };
+    await post(port, JSON.stringify(batch), { 'x-runtime-lens-token': token });
+    await httpOpened;
+
+    const unreachable = server.sessionsUnreachableForReset();
+    assert.equal(unreachable.length, 1);
+    assert.equal(unreachable[0].sessionId, 's-http');
+    assert.equal(unreachable[0].transport, 'http');
     ws.close();
   });
 

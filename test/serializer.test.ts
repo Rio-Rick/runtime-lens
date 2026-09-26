@@ -216,6 +216,20 @@ describe('serialization/serializer', () => {
       }
     );
     assert.doesNotThrow(() => serialize(proxy));
+
+    const tagThrowingProxy = new Proxy(
+      {},
+      {
+        get(_target, property) {
+          if (property === Symbol.toStringTag) {
+            throw new Error('tag lookup exploded');
+          }
+          return undefined;
+        }
+      }
+    );
+    assert.doesNotThrow(() => serialize(tagThrowingProxy));
+
   });
 
   it('exposes sane defaults', () => {

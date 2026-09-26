@@ -5,7 +5,7 @@
  * module graph - only read source text, instrument it, and hand it back.
  */
 import { createRequire, } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -38,7 +38,7 @@ export async function resolve(specifier, context, nextResolve) {
     ];
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {
-        return { url: new URL(`file://${candidate.replace(/\\/g, '/')}`).href, format: 'module', shortCircuit: true };
+        return { url: pathToFileURL(candidate).href, format: 'module', shortCircuit: true };
       }
     }
     throw err;

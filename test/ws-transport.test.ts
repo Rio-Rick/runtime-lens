@@ -62,6 +62,73 @@ describe('agent/ws-transport (inbound messages)', () => {
     assert.deepEqual(received, [], 'binary frames are not forwarded as config JSON');
   });
 
+  it('only unrefs the newly-created socket that matches the WebSocket endpoint', () => {
+    const originalGetActiveHandles = (process as unknown as { _getActiveHandles: () => unknown[] })._getActiveHandles;
+    let snapshot = 0;
+    let matchingUnrefs = 0;
+    let unrelatedUnrefs = 0;
+    const existing = { constructor: { name: 'Socket' }, remoteAddress: '127.0.0.1', remotePort: 4321 };
+    const matching = {
+      constructor: { name: 'Socket' },
+      remoteAddress: '127.0.0.1',
+      remotePort: 4321,
+      unref: () => matchingUnrefs++
+    };
+    const unrelated = { constructor: { name: 'Timeout' }, unref: () => unrelatedUnrefs++ };
+    (process as unknown as { _getActiveHandles: () => unknown[] })._getActiveHandles = () => {
+      snapshot++;
+      return snapshot === 1 ? [existing] : [existing, matching, unrelated];
+    };
+    try {
+      const transport = createGlobalWebSocketTransport(FakeSocket, 'ws://127.0.0.1:4321/rl?token=t');
+      transport.hello('{"t":"hello"}');
+      FakeSocket.instances[0].open();
+      assert.equal(matchingUnrefs, 1);
+      assert.equal(unrelatedUnrefs, 0);
+    } finally {
+      (process as unknown as { _getActiveHandles: () => unknown[] })._getActiveHandles = originalGetActiveHandles;
+    }
+  });
+
+  it('reconnects after a socket closes before the next send', () => {
+    const transport = createGlobalWebSocketTransport(FakeSocket, 'ws://127.0.0.1:1/rl?token=t');
+    transport.hello('{\"t\":\"hello-1\"}');
+    const first = FakeSocket.instances[0];
+    first.open();
+    first.close();
+
+    transport.send('{\"t\":\"event-after-reconnect\"}');
+    assert.equal(FakeSocket.instances.length, 2);
+    const second = FakeSocket.instances[1];
+    second.open();
+    assert.deepEqual(second.sent, ['{\"t\":\"hello-1\"}', '{\"t\":\"event-after-reconnect\"}']);
+  });
+
+  it('retains the unsent tail when the first socket send fails', () => {
+    class FlakySocket extends FakeSocket {
+      static shouldFail = true;
+      send(data: string): void {
+        if (FlakySocket.shouldFail && this.sent.length >= 1) {
+          FlakySocket.shouldFail = false;
+          throw new Error('socket send failed');
+        }
+        super.send(data);
+      }
+    }
+
+    const transport = createGlobalWebSocketTransport(FlakySocket, 'ws://127.0.0.1:1/rl?token=t');
+    transport.hello('{\"t\":\"hello\"}');
+    transport.send('{\"t\":\"event-1\"}');
+    transport.send('{\"t\":\"event-2\"}');
+    const first = FlakySocket.instances[0];
+    first.open();
+
+    assert.equal(FlakySocket.instances.length, 2);
+    const second = FlakySocket.instances[1];
+    second.open();
+    assert.deepEqual(second.sent, ['{\"t\":\"hello\"}', '{\"t\":\"event-1\"}', '{\"t\":\"event-2\"}']);
+  });
+
   it('still delivers state changes alongside inbound messages', () => {
     const transport = createGlobalWebSocketTransport(FakeSocket, 'ws://127.0.0.1:1/rl?token=t');
     const states: boolean[] = [];

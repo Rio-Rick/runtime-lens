@@ -93,7 +93,8 @@ describe('utils/ring-buffer', () => {
     assert.equal(buffer.size, 3);
     assert.equal(buffer.dropped, 0);
 
-    buffer.push(4);
+    const evicted = buffer.push(4);
+    assert.equal(evicted, 1);
     assert.deepEqual(buffer.toArray(), [2, 3, 4]);
     assert.equal(buffer.size, 3);
     assert.equal(buffer.dropped, 1);
@@ -137,6 +138,59 @@ describe('utils/ring-buffer', () => {
     buffer.push('b');
     assert.deepEqual(buffer.toArray(), ['b']);
     assert.equal(buffer.dropped, 1);
+  });
+});
+
+
+describe('runtime/store indexes', () => {
+  function entry(i: number) {
+    return {
+      event: {
+        t: 'expr' as const,
+        id: `probe-${i}`,
+        seq: i,
+        ts: i,
+        count: 1,
+        expr: `value${i}`,
+        loc: { file: `/p/f${i}.ts`, line: 1, column: 0 },
+        value: serialize(i)
+      },
+      sessionId: 's1',
+      loc: { file: `/p/f${i}.ts`, line: 1, column: 0 },
+      remapped: false
+    };
+  }
+
+  it('keeps derived indexes bounded and consistent with the ring buffer', () => {
+    const store = new EventStore(50, (event) => previewArgs(event.t === 'log' ? event.args : event.t === 'expr' ? [event.value] : [serialize(event.message)]));
+    for (let i = 0; i < 51; i++) {
+      store.add([entry(i)]);
+    }
+    const stats = store.stats();
+    assert.equal(stats.size, 50);
+    assert.equal(stats.lines, 50);
+    assert.equal(stats.probes, 50);
+    assert.equal(store.latestAt('/p/f0.ts', 1), undefined);
+    assert.equal(store.countFor('probe-0'), 0);
+    assert.ok(store.latestAt('/p/f50.ts', 1));
+    assert.equal(store.countFor('probe-50'), 1);
+  });
+
+  it('rebuilds indexes correctly when history is shrunk or expanded', () => {
+    const store = new EventStore(100, (event) => JSON.stringify(event));
+    for (let i = 0; i < 100; i++) {
+      store.add([entry(i)]);
+    }
+    store.setMaxHistory(50);
+    assert.equal(store.stats().size, 50);
+    assert.equal(store.stats().lines, 50);
+    assert.equal(store.latestAt('/p/f0.ts', 1), undefined);
+    assert.ok(store.latestAt('/p/f99.ts', 1));
+
+    store.setMaxHistory(100);
+    assert.equal(store.stats().size, 50);
+    assert.equal(store.stats().lines, 50);
+    assert.ok(store.latestAt('/p/f99.ts', 1));
   });
 });
 

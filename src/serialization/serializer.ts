@@ -24,7 +24,11 @@ export const DEFAULT_SERIALIZE_OPTIONS: SerializeOptions = {
 const TYPED_ARRAY_TAG = /^(Int|Uint|Float|BigInt|BigUint)(8|16|32|64)(Clamped)?Array$/;
 
 function tagOf(value: object): string {
-  return Object.prototype.toString.call(value).slice(8, -1);
+  try {
+    return Object.prototype.toString.call(value).slice(8, -1);
+  } catch {
+    return 'Object';
+  }
 }
 
 function functionKind(fn: Function): 'function' | 'class' | 'arrow' {
@@ -60,7 +64,14 @@ export function serialize(value: unknown, options: Partial<SerializeOptions> = {
   const opts: SerializeOptions = { ...DEFAULT_SERIALIZE_OPTIONS, ...options };
   const seen = new Map<object, string>();
   const state = { nodes: 0 };
-  return walk(value, opts, seen, state, 0, '$');
+  try {
+    return walk(value, opts, seen, state, 0, '$');
+  } catch (err) {
+    // A hostile Proxy can still make intrinsic operations such as Map access,
+    // `instanceof`, or Date methods throw despite the guards around normal
+    // property reads. Never let telemetry serialization alter user code.
+    return { k: 'unserializable', hint: `serialization failed: ${safeErrorMessage(err)}` };
+  }
 }
 
 function walk(
@@ -257,7 +268,7 @@ function readProp(obj: object, key: string): unknown {
   try {
     return (obj as Record<string, unknown>)[key];
   } catch (err) {
-    return new Error(`<throwing getter: ${(err as Error).message}>`);
+    return new Error(`<throwing getter: ${safeErrorMessage(err)}>`);
   }
 }
 
@@ -265,7 +276,18 @@ function readIndex(arr: unknown[], index: number): unknown {
   try {
     return arr[index];
   } catch (err) {
-    return new Error(`<throwing index: ${(err as Error).message}>`);
+    return new Error(`<throwing index: ${safeErrorMessage(err)}>`);
+  }
+}
+
+function safeErrorMessage(err: unknown): string {
+  try {
+    if (err instanceof Error && typeof err.message === 'string') {
+      return err.message.slice(0, 500);
+    }
+    return String(err).slice(0, 500);
+  } catch {
+    return 'unknown error';
   }
 }
 

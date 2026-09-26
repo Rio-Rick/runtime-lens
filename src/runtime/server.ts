@@ -2,6 +2,7 @@ import * as http from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
+  ABSOLUTE_MAX_PAYLOAD_BYTES,
   PROTOCOL_VERSION,
   parseClientMessage,
   type ClientMessage,
@@ -91,11 +92,27 @@ export class RuntimeServer {
   }
 
   get maxPayloadBytes(): number {
-    return this.options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD;
+    const configured = this.options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD;
+    return Math.min(ABSOLUTE_MAX_PAYLOAD_BYTES, Math.max(1024, Math.floor(configured)));
   }
 
   listSessions(): SessionInfo[] {
     return [...this.sessions.values()];
+  }
+
+  /**
+   * Forcibly end a session: closes its live WebSocket connection (if any)
+   * and drops it from the session list. Safe to call on a session with no
+   * live connection (an HTTP-transport session whose process exited without
+   * ever sending `bye` just sits in the list otherwise) — there's nothing to
+   * close, so this simply clears the stale entry. A still-running Node or
+   * browser agent reconnects on its own next flush (see ws-transport.ts),
+   * the same as after any other dropped connection — this isn't a way to
+   * silence a session for good, only to clear it from the current view.
+   * Returns `false` if `sessionId` wasn't a known session.
+   */
+  disconnectSession(sessionId: string, reason = 'disconnected-by-user'): boolean {
+    return this.evictSession(sessionId, reason);
   }
 
   stats(): { port: number; sessions: number; totalEvents: number; rejected: number; running: boolean } {
@@ -122,15 +139,36 @@ export class RuntimeServer {
 
     this.httpServer.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
 
-    await new Promise<void>((resolve, reject) => {
-      const server = this.httpServer as http.Server;
-      const onError = (err: Error): void => reject(err);
-      server.once('error', onError);
-      server.listen(port, host, () => {
-        server.removeListener('error', onError);
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const server = this.httpServer as http.Server;
+        const onError = (err: Error): void => reject(err);
+        server.once('error', onError);
+        server.listen(port, host, () => {
+          server.removeListener('error', onError);
+          resolve();
+        });
       });
-    });
+    } catch (err) {
+      // A failed listen can leave the HTTP server and WebSocket server objects
+      // allocated even though `running` was never reached. Release them here
+      // so a subsequent Start can retry cleanly (especially after EADDRINUSE).
+      try {
+        this.wss?.close();
+      } catch {
+        /* ignore cleanup errors */
+      }
+      try {
+        this.httpServer?.close();
+      } catch {
+        /* ignore cleanup errors */
+      }
+      this.wss = undefined;
+      this.httpServer = undefined;
+      this.portValue = 0;
+      this.tokenValue = '';
+      throw err;
+    }
 
     const address = this.httpServer.address();
     this.portValue = typeof address === 'object' && address ? address.port : port;
@@ -178,7 +216,7 @@ export class RuntimeServer {
     if (!cfg) {
       return;
     }
-    const message: ServerMessage = { t: 'config', v: PROTOCOL_VERSION, ...cfg };
+    const message: ServerMessage = { t: 'config', v: PROTOCOL_VERSION, ...cfg, maxPayloadBytes: this.maxPayloadBytes };
     const json = JSON.stringify(message);
     for (const socket of this.sockets.keys()) {
       try {
@@ -187,6 +225,40 @@ export class RuntimeServer {
         /* ignore */
       }
     }
+  }
+
+  /**
+   * Tell every connected agent to zero its per-probe execution counters
+   * (see `ServerResetMessage`). Called when the user clears the log —
+   * without this, a probe's `× N` counter would keep counting up from its
+   * pre-clear value on the next event, since that count is computed in the
+   * agent's process, not derived from the (now-empty) local history.
+   *
+   * Only reaches agents connected over WebSocket: the HTTP batch transport
+   * (used when no global `WebSocket` is available, e.g. Node < 22) has no
+   * receive channel, the same limitation `broadcastConfig` already has for
+   * live capture-switch pushes. `sessionsUnreachableForReset()` reports
+   * which currently-connected sessions that affects.
+   */
+  broadcastReset(): void {
+    const message: ServerMessage = { t: 'reset', v: PROTOCOL_VERSION };
+    const json = JSON.stringify(message);
+    for (const socket of this.sockets.keys()) {
+      try {
+        socket.send(json);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /**
+   * Sessions that `broadcastReset` cannot reach because they connected over
+   * the receive-less HTTP transport. Their agent-side counters will keep
+   * incrementing from their pre-clear values until that process restarts.
+   */
+  sessionsUnreachableForReset(): SessionInfo[] {
+    return [...this.sessions.values()].filter((s) => s.transport === 'http');
   }
 
   // ---------------------------------------------------------------- upgrade
@@ -210,7 +282,7 @@ export class RuntimeServer {
       this.rejectUpgrade(socket, 403, 'non-local origin');
       return;
     }
-    this.wss?.handleUpgrade(req, socket, head, (ws) => this.attachSocket(ws));
+    this.wss?.handleUpgrade(req, socket, head, (ws) => this.attachSocket(ws, this.tokenValue));
   }
 
   private rejectUpgrade(socket: Duplex, status: number, reason: string): void {
@@ -221,10 +293,41 @@ export class RuntimeServer {
     }
   }
 
-  private attachSocket(ws: WebSocket): void {
+  /**
+   * Close any live socket bound to `sessionId` and drop it from the session
+   * list, emitting exactly one `session-close` if there was anything to
+   * remove. Shared by the reconnect race handler below (which excludes the
+   * new socket that's replacing it) and the public `disconnectSession`.
+   */
+  private evictSession(sessionId: string, reason: string, excludeSocket?: WebSocket): boolean {
+    let evicted = false;
+    for (const [socket, boundId] of this.sockets) {
+      if (boundId !== sessionId || socket === excludeSocket) {
+        continue;
+      }
+      this.sockets.delete(socket);
+      try {
+        socket.close(1000, reason);
+      } catch {
+        /* ignore */
+      }
+      evicted = true;
+    }
+    if (this.sessions.delete(sessionId)) {
+      evicted = true;
+    }
+    if (evicted) {
+      this.emitter.emit('session-close', { sessionId, reason });
+    }
+    return evicted;
+  }
+
+  private attachSocket(ws: WebSocket, expectedToken: string): void {
+    let boundSessionId: string | undefined;
+
     ws.on('message', (data, isBinary) => {
       const raw = isBinary ? (data as Buffer) : data.toString();
-      const parsed = parseClientMessage(raw as string | Uint8Array, this.maxPayloadBytes, undefined);
+      const parsed = parseClientMessage(raw as string | Uint8Array, this.maxPayloadBytes, expectedToken);
       if (!parsed.ok) {
         this.rejected++;
         this.emitter.emit('protocol-error', { code: parsed.code, message: parsed.error });
@@ -234,7 +337,39 @@ export class RuntimeServer {
         }
         return;
       }
-      this.ingest(parsed.value, 'ws', ws);
+
+      const message = parsed.value;
+      if (message.t === 'hello') {
+        if (boundSessionId !== undefined) {
+          this.rejectSocketMessage(ws, 'WebSocket session already authenticated');
+          return;
+        }
+
+        // A reconnect can race the old socket's close event. Replace the old
+        // connection atomically (excluding `ws` itself, though it can't be
+        // registered yet at this point) so its later close handler cannot
+        // delete the newly-connected session.
+        this.evictSession(message.sessionId, 'replaced', ws);
+
+        boundSessionId = message.sessionId;
+        this.ingest(message, 'ws', ws);
+        return;
+      }
+
+      if (boundSessionId === undefined) {
+        this.rejectSocketMessage(ws, 'hello is required before batch/bye');
+        return;
+      }
+      if (message.sessionId !== boundSessionId) {
+        this.rejectSocketMessage(ws, 'sessionId does not match the authenticated WebSocket');
+        return;
+      }
+
+      this.ingest(message, 'ws', ws);
+      if (message.t === 'bye') {
+        this.sockets.delete(ws);
+        boundSessionId = undefined;
+      }
     });
     ws.on('close', () => {
       const sessionId = this.sockets.get(ws);
@@ -245,6 +380,17 @@ export class RuntimeServer {
       }
     });
     ws.on('error', (error) => this.emitter.emit('error', { error }));
+  }
+
+  private rejectSocketMessage(ws: WebSocket, message: string): void {
+    this.rejected++;
+    this.emitter.emit('protocol-error', { code: 'bad-message', message });
+    this.sendServerError(ws, 'bad-message', message);
+    try {
+      ws.close(1008, 'bad-message');
+    } catch {
+      /* ignore */
+    }
   }
 
   private sendServerError(ws: WebSocket, code: ServerErrorMessage['code'], message: string): void {
@@ -353,7 +499,9 @@ export class RuntimeServer {
           const cfg = this.options.getAgentConfig?.();
           if (cfg) {
             try {
-              ws.send(JSON.stringify({ t: 'config', v: PROTOCOL_VERSION, ...cfg } satisfies ServerMessage));
+              ws.send(
+                JSON.stringify({ t: 'config', v: PROTOCOL_VERSION, ...cfg, maxPayloadBytes: this.maxPayloadBytes } satisfies ServerMessage)
+              );
             } catch {
               /* ignore */
             }

@@ -19,6 +19,11 @@ export interface StoreEvents {
   'filter-changed': { filter: EventFilter };
 }
 
+interface IndexBucket<T> {
+  items: T[];
+  head: number;
+}
+
 export interface EventFilter {
   /** Case-insensitive substring match over the rendered text and file path. */
   query: string;
@@ -45,6 +50,8 @@ export class EventStore {
   private nextKey = 1;
   private readonly byLine = new Map<string, StoredEvent>();
   private readonly countsByProbe = new Map<string, number>();
+  private readonly lineHistory = new Map<string, IndexBucket<StoredEvent>>();
+  private readonly probeHistory = new Map<string, IndexBucket<StoredEvent>>();
   private filterValue: EventFilter = { ...EMPTY_FILTER };
   private totalAdded = 0;
 
@@ -63,15 +70,18 @@ export class EventStore {
 
   setMaxHistory(maxHistory: number): void {
     this.buffer.resize(Math.max(50, maxHistory));
+    this.rebuildIndexes();
   }
 
   add(entries: Array<{ event: RuntimeEvent; sessionId: string; loc: SourceLocation; remapped: boolean }>): StoredEvent[] {
     const stored: StoredEvent[] = [];
     for (const entry of entries) {
       const item: StoredEvent = { key: this.nextKey++, ...entry };
-      this.buffer.push(item);
-      this.byLine.set(lineKey(item.loc.file, item.loc.line), item);
-      this.countsByProbe.set(item.event.id, item.event.count);
+      const evicted = this.buffer.push(item);
+      this.indexAdded(item);
+      if (evicted) {
+        this.indexRemoved(evicted);
+      }
       this.totalAdded++;
       stored.push(item);
     }
@@ -85,6 +95,8 @@ export class EventStore {
     this.buffer.clear();
     this.byLine.clear();
     this.countsByProbe.clear();
+    this.lineHistory.clear();
+    this.probeHistory.clear();
     this.emitter.emit('cleared', {} as Record<string, never>);
   }
 
@@ -120,6 +132,53 @@ export class EventStore {
 
   countFor(probeId: string): number {
     return this.countsByProbe.get(probeId) ?? 0;
+  }
+
+  private indexAdded(item: StoredEvent): void {
+    const line = lineKey(item.loc.file, item.loc.line);
+    appendIndex(this.lineHistory, line, item);
+    this.byLine.set(line, item);
+
+    const probe = item.event.id;
+    appendIndex(this.probeHistory, probe, item);
+    this.countsByProbe.set(probe, item.event.count);
+  }
+
+  private indexRemoved(item: StoredEvent): void {
+    const line = lineKey(item.loc.file, item.loc.line);
+    const lineBucket = this.lineHistory.get(line);
+    if (lineBucket) {
+      advanceBucketPast(lineBucket, item);
+      if (lineBucket.head >= lineBucket.items.length) {
+        this.lineHistory.delete(line);
+        this.byLine.delete(line);
+      } else if (this.byLine.get(line)?.key === item.key) {
+        this.byLine.set(line, lineBucket.items[lineBucket.items.length - 1]);
+      }
+    }
+
+    const probe = item.event.id;
+    const probeBucket = this.probeHistory.get(probe);
+    if (probeBucket) {
+      advanceBucketPast(probeBucket, item);
+      if (probeBucket.head >= probeBucket.items.length) {
+        this.probeHistory.delete(probe);
+        this.countsByProbe.delete(probe);
+      } else if (this.countsByProbe.has(probe)) {
+        const latest = probeBucket.items[probeBucket.items.length - 1];
+        this.countsByProbe.set(probe, latest.event.count);
+      }
+    }
+  }
+
+  private rebuildIndexes(): void {
+    this.byLine.clear();
+    this.countsByProbe.clear();
+    this.lineHistory.clear();
+    this.probeHistory.clear();
+    for (const item of this.buffer) {
+      this.indexAdded(item);
+    }
   }
 
   stats(): { size: number; capacity: number; dropped: number; totalAdded: number; lines: number; probes: number } {
@@ -166,6 +225,27 @@ export class EventStore {
       }
     }
     return true;
+  }
+}
+
+function appendIndex<T>(map: Map<string, IndexBucket<T>>, key: string, item: T): void {
+  const bucket = map.get(key);
+  if (bucket) {
+    bucket.items.push(item);
+    return;
+  }
+  map.set(key, { items: [item], head: 0 });
+}
+
+function advanceBucketPast<T extends StoredEvent>(bucket: IndexBucket<T>, item: T): void {
+  if (bucket.head >= bucket.items.length || bucket.items[bucket.head]?.key !== item.key) {
+    return;
+  }
+  bucket.head++;
+  // Drop consumed prefixes periodically so a hot line/probe stays bounded.
+  if (bucket.head >= 32 && bucket.head * 2 >= bucket.items.length) {
+    bucket.items = bucket.items.slice(bucket.head);
+    bucket.head = 0;
   }
 }
 

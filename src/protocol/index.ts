@@ -132,6 +132,15 @@ export interface ServerConfigMessage {
   captureExpressions: boolean;
   paused: boolean;
   objectDepth: number;
+  /**
+   * The server's configured payload-size ceiling (see `maxPayloadBytes` in
+   * server.ts). Sent so the agent can size its own outgoing batches safely
+   * under the real limit instead of guessing at one — see `maxBatchBytes`
+   * in agent/core.ts. Optional so an agent that predates this field (or a
+   * message with it stripped) still validates; the agent falls back to its
+   * own conservative built-in default.
+   */
+  maxPayloadBytes?: number;
 }
 
 export interface ServerErrorMessage {
@@ -141,7 +150,19 @@ export interface ServerErrorMessage {
   message: string;
 }
 
-export type ServerMessage = ServerAckMessage | ServerConfigMessage | ServerErrorMessage;
+/**
+ * Tells a connected agent to zero its per-probe execution counters (the `N`
+ * in `count`, rendered in the editor as `× N`). Sent when the user runs
+ * "Clear" so a probe that had already run before the clear starts back at
+ * `× 1` instead of resuming from its pre-clear count. This does not touch
+ * `seq`, which must stay monotonic for ordering.
+ */
+export interface ServerResetMessage {
+  t: 'reset';
+  v: string;
+}
+
+export type ServerMessage = ServerAckMessage | ServerConfigMessage | ServerErrorMessage | ServerResetMessage;
 
 /** Hard cap on a single batch regardless of user settings. */
 export const ABSOLUTE_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -198,51 +219,110 @@ export function validateSerializedValue(x: unknown, depth = 0): boolean {
   if (depth > 32 || !isPlainRecord(x) || typeof x.k !== 'string') {
     return false;
   }
+
+  const validText = (value: unknown, max = 16_384): value is string => typeof value === 'string' && value.length <= max;
+  const validCount = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  const validEntriesLength = (entries: unknown): entries is unknown[] =>
+    Array.isArray(entries) && entries.length <= 1_000;
+
   switch (x.k) {
     case 'null':
     case 'undefined':
       return true;
     case 'string':
-      return typeof x.v === 'string';
+      return (
+        typeof x.v === 'string' &&
+        validText(x.v, 10_000_000) &&
+        (x.truncated === undefined || typeof x.truncated === 'boolean') &&
+        (x.length === undefined || validCount(x.length))
+      );
     case 'number':
-      return typeof x.v === 'number' || x.v === 'NaN' || x.v === 'Infinity' || x.v === '-Infinity';
+      return (
+        (typeof x.v === 'number' && Number.isFinite(x.v)) ||
+        x.v === 'NaN' ||
+        x.v === 'Infinity' ||
+        x.v === '-Infinity'
+      );
     case 'boolean':
       return typeof x.v === 'boolean';
     case 'bigint':
     case 'symbol':
     case 'date':
     case 'regexp':
-      return typeof x.v === 'string';
+      return validText(x.v);
     case 'function':
-      return typeof x.name === 'string' && typeof x.arity === 'number';
+      return (
+        validText(x.name, 1024) &&
+        (x.kind === 'function' || x.kind === 'class' || x.kind === 'arrow') &&
+        typeof x.arity === 'number' &&
+        Number.isSafeInteger(x.arity) &&
+        x.arity >= 0
+      );
     case 'error':
-      return typeof x.name === 'string' && typeof x.message === 'string';
+      if (!validText(x.name, 1024) || !validText(x.message, 16_384)) {
+        return false;
+      }
+      if (x.stack !== undefined && !validText(x.stack, 16_384)) {
+        return false;
+      }
+      if (x.props === undefined) {
+        return true;
+      }
+      if (!isPlainRecord(x.props) || Object.keys(x.props).length > 1_000) {
+        return false;
+      }
+      return Object.values(x.props).every((value) => validateSerializedValue(value, depth + 1));
     case 'array':
-    case 'set':
-      return Array.isArray(x.entries) && x.entries.every((e) => validateSerializedValue(e, depth + 1));
+      return (
+        validEntriesLength(x.entries) &&
+        validCount(x.length) &&
+        x.entries.length <= x.length &&
+        (x.truncated === undefined || typeof x.truncated === 'boolean') &&
+        x.entries.every((entry) => validateSerializedValue(entry, depth + 1))
+      );
     case 'object':
       return (
-        Array.isArray(x.entries) &&
+        validEntriesLength(x.entries) &&
+        validCount(x.size) &&
+        x.entries.length <= x.size &&
+        (x.ctor === undefined || validText(x.ctor, 1024)) &&
+        (x.truncated === undefined || typeof x.truncated === 'boolean') &&
         x.entries.every(
-          (e) => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string' && validateSerializedValue(e[1], depth + 1)
+          (entry) =>
+            Array.isArray(entry) &&
+            entry.length === 2 &&
+            validText(entry[0], 4096) &&
+            validateSerializedValue(entry[1], depth + 1)
         )
       );
     case 'map':
       return (
-        Array.isArray(x.entries) &&
+        validEntriesLength(x.entries) &&
+        validCount(x.size) &&
+        x.entries.length <= x.size &&
+        (x.truncated === undefined || typeof x.truncated === 'boolean') &&
         x.entries.every(
-          (e) =>
-            Array.isArray(e) &&
-            e.length === 2 &&
-            validateSerializedValue(e[0], depth + 1) &&
-            validateSerializedValue(e[1], depth + 1)
+          (entry) =>
+            Array.isArray(entry) &&
+            entry.length === 2 &&
+            validateSerializedValue(entry[0], depth + 1) &&
+            validateSerializedValue(entry[1], depth + 1)
         )
       );
+    case 'set':
+      return (
+        validEntriesLength(x.entries) &&
+        validCount(x.size) &&
+        x.entries.length <= x.size &&
+        (x.truncated === undefined || typeof x.truncated === 'boolean') &&
+        x.entries.every((entry) => validateSerializedValue(entry, depth + 1))
+      );
     case 'circular':
-      return typeof x.path === 'string';
+      return validText(x.path, 4096);
     case 'maxdepth':
     case 'unserializable':
-      return typeof x.hint === 'string';
+      return validText(x.hint, 4096);
     default:
       return false;
   }
@@ -255,13 +335,13 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
   if (typeof x.id !== 'string' || x.id.length === 0 || x.id.length > 128) {
     return fail('bad-message', 'event.id must be a short string');
   }
-  if (typeof x.seq !== 'number' || !Number.isFinite(x.seq) || x.seq < 0) {
+  if (typeof x.seq !== 'number' || !Number.isSafeInteger(x.seq) || x.seq < 0) {
     return fail('bad-message', 'event.seq must be a non-negative number');
   }
   if (typeof x.ts !== 'number' || !Number.isFinite(x.ts)) {
     return fail('bad-message', 'event.ts must be a number');
   }
-  if (typeof x.count !== 'number' || !Number.isFinite(x.count) || x.count < 1) {
+  if (typeof x.count !== 'number' || !Number.isSafeInteger(x.count) || x.count < 1) {
     return fail('bad-message', 'event.count must be >= 1');
   }
   const loc = validateLocation(x.loc);
@@ -279,7 +359,7 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
         return fail('bad-message', 'log.args must be an array of serialized values');
       }
       const ev: LogEvent = { ...base, t: 'log', level: x.level as LogLevel, args: x.args as SerializedValue[] };
-      if (Array.isArray(x.exprs) && x.exprs.every((e) => typeof e === 'string')) {
+      if (Array.isArray(x.exprs) && x.exprs.length <= 64 && x.exprs.every((e) => typeof e === 'string' && e.length <= 4096)) {
         ev.exprs = x.exprs as string[];
       }
       return { ok: true, value: ev };
@@ -347,7 +427,7 @@ export function validateClientMessage(raw: unknown, expectedToken?: string): Val
           sessionId: raw.sessionId,
           runtime,
           label: typeof raw.label === 'string' ? raw.label.slice(0, 200) : 'unknown',
-          pid: typeof raw.pid === 'number' ? raw.pid : undefined,
+          pid: typeof raw.pid === 'number' && Number.isSafeInteger(raw.pid) && raw.pid >= 0 ? raw.pid : undefined,
           cwd: typeof raw.cwd === 'string' ? raw.cwd.slice(0, 4096) : undefined
         }
       };
@@ -367,6 +447,10 @@ export function validateClientMessage(raw: unknown, expectedToken?: string): Val
         }
         events.push(res.value);
       }
+      const dropped = raw.dropped;
+      if (dropped !== undefined && (typeof dropped !== 'number' || !Number.isSafeInteger(dropped) || dropped < 0)) {
+        return fail('bad-message', 'batch.dropped must be a non-negative integer');
+      }
       return {
         ok: true,
         value: {
@@ -374,7 +458,7 @@ export function validateClientMessage(raw: unknown, expectedToken?: string): Val
           v: raw.v as string,
           sessionId: raw.sessionId,
           events,
-          dropped: typeof raw.dropped === 'number' && raw.dropped > 0 ? Math.floor(raw.dropped) : undefined
+          dropped: dropped === undefined ? undefined : dropped
         }
       };
     }
@@ -438,6 +522,13 @@ export function validateServerMessage(raw: unknown): ValidationResult<ServerMess
       if (typeof raw.objectDepth !== 'number' || !Number.isFinite(raw.objectDepth) || raw.objectDepth < 0) {
         return fail('bad-message', 'config.objectDepth must be a non-negative number');
       }
+      let maxPayloadBytes: number | undefined;
+      if (raw.maxPayloadBytes !== undefined) {
+        if (typeof raw.maxPayloadBytes !== 'number' || !Number.isFinite(raw.maxPayloadBytes) || raw.maxPayloadBytes <= 0) {
+          return fail('bad-message', 'config.maxPayloadBytes must be a positive number');
+        }
+        maxPayloadBytes = raw.maxPayloadBytes;
+      }
       return {
         ok: true,
         value: {
@@ -446,15 +537,23 @@ export function validateServerMessage(raw: unknown): ValidationResult<ServerMess
           captureConsole: raw.captureConsole,
           captureExpressions: raw.captureExpressions,
           paused: raw.paused,
-          objectDepth: Math.floor(raw.objectDepth)
+          objectDepth: Math.floor(raw.objectDepth),
+          ...(maxPayloadBytes !== undefined ? { maxPayloadBytes } : {})
         }
       };
     }
-    case 'ack':
+    case 'ack': {
+      const received = raw.received;
+      if (typeof received !== 'number' || !Number.isSafeInteger(received) || received < 0) {
+        return fail('bad-message', 'ack.received must be a non-negative integer');
+      }
       return {
         ok: true,
-        value: { t: 'ack', v: raw.v as string, received: typeof raw.received === 'number' ? raw.received : 0 }
+        value: { t: 'ack', v: raw.v as string, received }
       };
+    }
+    case 'reset':
+      return { ok: true, value: { t: 'reset', v: raw.v as string } };
     case 'error':
       return {
         ok: true,

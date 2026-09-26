@@ -189,7 +189,7 @@ describe('integrations/webpack-loader (Next.js)', () => {
     it('picks the browser agent from options.target when the context has no target at all', () => {
       const result = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN, target: 'browser' });
       assert.ok(result.code);
-      assert.match(result.code, /runtime-lens[\\/]browser-agent-/, 'browser pass should bundle the browser agent');
+      assert.match(result.code, /runtime-lens[\\/]browser-agent\.mjs/, 'browser pass should bundle the browser agent');
     });
 
     it('picks the node agent from options.target when the context has no target at all', () => {
@@ -200,7 +200,7 @@ describe('integrations/webpack-loader (Next.js)', () => {
 
     it('still honours a real webpack this.target when no options.target is supplied', () => {
       const web = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN }, { target: 'web' });
-      assert.match(web.code ?? '', /runtime-lens[\\/]browser-agent-/);
+      assert.match(web.code ?? '', /runtime-lens[\\/]browser-agent\.mjs/);
       const node = runLoader(pageSource, pageFile, { port: 7777, token: TOKEN }, { target: 'node' });
       assert.match(node.code ?? '', /runtime-lens[\\/]node-agent\.js/);
     });
