@@ -64,12 +64,28 @@ export interface BaseEvent {
   count: number;
 }
 
+export interface ConsoleTableRow {
+  /** Stable row key (usually the source object's array/index/property key). */
+  key: string;
+  /** Cells align 1:1 with `ConsoleTablePayload.columns` after the index column. */
+  cells: SerializedValue[];
+}
+
+export interface ConsoleTablePayload {
+  /** Displayed data columns, excluding the implicit `(index)` column. */
+  columns: string[];
+  rows: ConsoleTableRow[];
+  truncated?: boolean;
+}
+
 export interface LogEvent extends BaseEvent {
   t: 'log';
   level: LogLevel;
   args: SerializedValue[];
   /** Raw expression text of each argument, as written in source. */
   exprs?: string[];
+  /** Normalized payload emitted for `console.table(...)`. */
+  table?: ConsoleTablePayload;
 }
 
 export interface ExprEvent extends BaseEvent {
@@ -359,6 +375,39 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
         return fail('bad-message', 'log.args must be an array of serialized values');
       }
       const ev: LogEvent = { ...base, t: 'log', level: x.level as LogLevel, args: x.args as SerializedValue[] };
+      if (x.table !== undefined) {
+        if (x.level !== 'table' || !isPlainRecord(x.table)) {
+          return fail('bad-message', 'log.table is only valid for console.table');
+        }
+        const columns = x.table.columns;
+        const rows = x.table.rows;
+        if (
+          !Array.isArray(columns) ||
+          columns.length > 256 ||
+          !columns.every((column) => typeof column === 'string' && column.length <= 1024) ||
+          !Array.isArray(rows) ||
+          rows.length > 1_000
+        ) {
+          return fail('bad-message', 'log.table has an invalid shape');
+        }
+        for (const row of rows) {
+          if (
+            !isPlainRecord(row) ||
+            typeof row.key !== 'string' ||
+            row.key.length > 1024 ||
+            !Array.isArray(row.cells) ||
+            row.cells.length !== columns.length ||
+            !row.cells.every((cell) => validateSerializedValue(cell))
+          ) {
+            return fail('bad-message', 'log.table.rows contains an invalid row');
+          }
+        }
+        ev.table = {
+          columns: columns as string[],
+          rows: rows as Array<{ key: string; cells: SerializedValue[] }>,
+          truncated: x.table.truncated === true ? true : undefined
+        };
+      }
       if (Array.isArray(x.exprs) && x.exprs.length <= 64 && x.exprs.every((e) => typeof e === 'string' && e.length <= 4096)) {
         ev.exprs = x.exprs as string[];
       }

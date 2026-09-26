@@ -40,11 +40,32 @@ for (const name of ['node-loader.mjs', 'node-hooks.mjs', 'node-require.cjs']) {
 // 2. Webview media.
 copyDir(path.join(root, 'src', 'webview', 'media'), path.join(out, 'webview', 'media'));
 
+const esbuild = path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'esbuild.cmd' : 'esbuild');
+// 2b. Bundle the React Webview separately from the extension host.
+// React/ReactDOM are bundled into this browser artifact, so the installed
+// extension does not depend on a CDN or a UI framework runtime at page load.
+const webviewEntry = path.join(root, 'src', 'webview', 'main.tsx');
+const webviewTarget = path.join(out, 'webview', 'media', 'main.js');
+fs.mkdirSync(path.dirname(webviewTarget), { recursive: true });
+execFileSync(
+  esbuild,
+  [
+    webviewEntry,
+    '--bundle',
+    '--format=iife',
+    '--platform=browser',
+    '--target=es2020',
+    '--legal-comments=none',
+    `--outfile=${webviewTarget}`
+  ],
+  { stdio: 'inherit', cwd: root }
+);
+console.log(`bundled ${path.relative(root, webviewEntry)} -> ${path.relative(root, webviewTarget)}`);
+
 // 3. Activity-bar icon (also referenced from package.json).
 copy(path.join(root, 'media', 'lens.svg'), path.join(root, 'out', 'media', 'lens.svg'));
 
 // 4. Bundle the browser agent to a single ESM file.
-const esbuild = path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'esbuild.cmd' : 'esbuild');
 const entry = path.join(root, 'src', 'agent', 'browser-agent.ts');
 const target = path.join(out, 'agent', 'browser-agent.mjs');
 fs.mkdirSync(path.dirname(target), { recursive: true });

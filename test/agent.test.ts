@@ -101,6 +101,41 @@ describe('agent/core (console interception)', () => {
     assert.equal((calls[2][1][0] as Error).message, 'bad', 'the original object identity is preserved');
   });
 
+  it('normalizes console.table into a rectangular payload while preserving the original call', () => {
+    const transport = new FakeTransport();
+    const calls = withCapturedConsole((recorded) => {
+      const agent = makeAgent(transport);
+      agent.c(
+        'table',
+        'table-1',
+        '/p/a.ts',
+        9,
+        0,
+        [
+          [
+            { name: 'Ada', age: 36 },
+            { name: 'Linus', age: 54, language: 'C' }
+          ],
+          ['ignored-by-shape']
+        ]
+      );
+      agent.flush();
+      agent.dispose();
+      return recorded;
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], 'table');
+
+    const event = transport.events().find((item) => item.id === 'table-1') as LogEvent;
+    assert.equal(event.level, 'table');
+    assert.ok(event.table);
+    assert.deepEqual(event.table?.columns, ['Value', 'name', 'age', 'language']);
+    assert.deepEqual(event.table?.rows.map((row) => row.key), ['0', '1', '2']);
+    assert.equal(event.table?.rows[0].cells[0].k, 'undefined');
+    assert.deepEqual(event.table?.rows[1].cells.map((cell) => cell.k), ['undefined', 'string', 'number', 'string']);
+  });
+
   it('uses the current console method when the application patches it after agent startup', () => {
     const transport = new FakeTransport();
     const original = globalThis.console;

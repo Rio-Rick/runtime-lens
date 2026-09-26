@@ -12,6 +12,7 @@
  */
 import { PROTOCOL_VERSION, parseServerMessage, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
 import { serialize } from '../serialization/serializer';
+import type { ConsoleTablePayload, SerializedValue } from '../protocol';
 
 export interface AgentTransport {
   /** Send one already-serialized JSON string. Must not throw. */
@@ -185,6 +186,9 @@ export class Agent {
     try {
       if (!this.disabled && !this.paused && this.config.captureConsole) {
         const count = this.bump(id);
+        const serializedArgs = args.map((a) =>
+          serialize(a, { depth: this.config.objectDepth, maxStringLength: this.config.maxStringLength })
+        );
         this.push({
           t: 'log',
           id,
@@ -193,9 +197,8 @@ export class Agent {
           count,
           level,
           loc: { file, line, column },
-          args: args.map((a) =>
-            serialize(a, { depth: this.config.objectDepth, maxStringLength: this.config.maxStringLength })
-          )
+          args: serializedArgs,
+          ...(level === 'table' ? { table: normalizeConsoleTable(args, this.config.objectDepth, this.config.maxStringLength) } : {})
         });
       }
     } catch {
@@ -349,6 +352,133 @@ export class Agent {
       disabled: this.disabled
     };
   }
+}
+
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function safeObjectKeys(value: object): string[] {
+  try {
+    return Object.keys(value);
+  } catch {
+    return [];
+  }
+}
+
+function safeGet(value: unknown, key: string): unknown {
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch (err) {
+    return new Error(`<throwing getter: ${err instanceof Error ? err.message : String(err)}>`);
+  }
+}
+
+function serializeTableCell(value: unknown, depth: number, maxStringLength: number): SerializedValue {
+  return serialize(value, { depth, maxStringLength });
+}
+
+/**
+ * Convert the arguments passed to console.table into a bounded, rectangular
+ * payload that the Webview can sort/render without knowing about runtime
+ * object shapes.
+ *
+ * `console.table(data, columns)` is intentionally supported: a string[] second
+ * argument limits the displayed columns just like the native console API.
+ */
+function normalizeConsoleTable(
+  args: unknown[],
+  depth: number,
+  maxStringLength: number
+): ConsoleTablePayload {
+  const input = args[0];
+  const requestedColumns = Array.isArray(args[1])
+    ? args[1].filter((column): column is string => typeof column === 'string').slice(0, 256)
+    : undefined;
+
+  const rows: Array<{ key: string; source: unknown }> = [];
+
+  if (Array.isArray(input)) {
+    for (let i = 0; i < Math.min(input.length, 1000); i++) {
+      rows.push({ key: String(i), source: input[i] });
+    }
+  } else if (isRecord(input)) {
+    for (const key of safeObjectKeys(input).slice(0, 1000)) {
+      rows.push({ key, source: safeGet(input, key) });
+    }
+  } else {
+    rows.push({ key: '0', source: input });
+  }
+
+  let columns: string[] = [];
+  const objectLikeRows = rows.length > 0 && rows.some(({ source }) => Array.isArray(source) || isRecord(source));
+  const primitiveRows = rows.some(({ source }) => !Array.isArray(source) && !isRecord(source));
+
+  if (objectLikeRows) {
+    const seen = new Set<string>();
+    for (const { source } of rows) {
+      if (Array.isArray(source)) {
+        for (let i = 0; i < Math.min(source.length, 256); i++) {
+          const key = String(i);
+          if (!seen.has(key)) {
+            seen.add(key);
+            columns.push(key);
+          }
+        }
+      } else if (isRecord(source)) {
+        for (const key of safeObjectKeys(source).slice(0, 256)) {
+          if (!seen.has(key)) {
+            seen.add(key);
+            columns.push(key);
+          }
+        }
+      }
+      if (columns.length >= 256) {
+        break;
+      }
+    }
+    if (primitiveRows && !columns.includes('Value')) {
+      columns.unshift('Value');
+    }
+  } else {
+    columns = ['Value'];
+  }
+
+  if (requestedColumns) {
+    const allowed = new Set(requestedColumns);
+    columns = columns.filter((column) => allowed.has(column));
+  }
+
+  // For a top-level object with primitive values, preserve the useful
+  // `(index) | Value` shape. For arrays/objects-of-objects, cells map directly
+  // to the collected property columns.
+  const normalizedRows = rows.map(({ key, source }) => ({
+    key,
+    cells: columns.map((column) => {
+      if (column === 'Value' && primitiveRows && !Array.isArray(source) && !isRecord(source)) {
+        return serializeTableCell(source, depth, maxStringLength);
+      }
+      if (columns.length === 1 && columns[0] === 'Value') {
+        return serializeTableCell(source, depth, maxStringLength);
+      }
+      if (Array.isArray(source)) {
+        const index = Number(column);
+        return serializeTableCell(Number.isInteger(index) ? source[index] : undefined, depth, maxStringLength);
+      }
+      return serializeTableCell(isRecord(source) ? safeGet(source, column) : undefined, depth, maxStringLength);
+    })
+  }));
+
+  return {
+    columns,
+    rows: normalizedRows,
+    truncated: (Array.isArray(input) && input.length > rows.length) ||
+      (isRecord(input) && safeObjectKeys(input).length > rows.length) ||
+      columns.length >= 256
+      ? true
+      : undefined
+  };
 }
 
 /** A no-op stand-in used when no editor endpoint is configured. */

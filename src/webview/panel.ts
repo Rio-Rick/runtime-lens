@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { LogLevel } from '../protocol';
+import type { ConsoleTablePayload, LogLevel, SerializedValue } from '../protocol';
 import type { EventStore, StoredEvent } from '../runtime/store';
 import { eventText } from '../vscode/render';
 import { toPlainText } from '../serialization/preview';
@@ -11,6 +11,12 @@ export interface PanelHostActions {
   setPaused(paused: boolean): void;
   isPaused(): boolean;
   setFilter(query: string, levels: LogLevel[] | undefined): void;
+}
+
+interface WireTable {
+  columns: string[];
+  rows: Array<{ key: string; cells: SerializedValue[] }>;
+  truncated?: boolean;
 }
 
 interface WireEvent {
@@ -25,6 +31,7 @@ interface WireEvent {
   count: number;
   ts: number;
   remapped: boolean;
+  table?: WireTable;
 }
 
 /**
@@ -90,7 +97,15 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
     if (typeof message !== 'object' || message === null) {
       return;
     }
-    const msg = message as { type?: string; query?: string; levels?: string[]; key?: number; follow?: boolean; paused?: boolean };
+    const msg = message as {
+      type?: string;
+      query?: string;
+      levels?: string[];
+      key?: number;
+      follow?: boolean;
+      paused?: boolean;
+      text?: string;
+    };
     switch (msg.type) {
       case 'ready':
         this.sendSnapshot();
@@ -122,6 +137,14 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
           void vscode.env.clipboard.writeText(detailOf(stored));
           void vscode.window.showInformationMessage('Runtime Lens: value copied to clipboard.');
         }
+        return;
+      }
+      case 'copy-table': {
+        if (typeof msg.text !== 'string' || msg.text.length === 0) {
+          return;
+        }
+        void vscode.env.clipboard.writeText(msg.text);
+        void vscode.window.showInformationMessage('Runtime Lens: table copied to clipboard.');
         return;
       }
       default:
@@ -167,27 +190,7 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
 <title>Runtime Lens Explorer</title>
 </head>
 <body>
-  <header class="toolbar">
-    <input id="search" type="search" placeholder="Search values, files…" autocomplete="off" />
-    <div class="levels" id="levels">
-      <label><input type="checkbox" value="log" checked /> log</label>
-      <label><input type="checkbox" value="info" checked /> info</label>
-      <label><input type="checkbox" value="warn" checked /> warn</label>
-      <label><input type="checkbox" value="error" checked /> error</label>
-      <label><input type="checkbox" value="debug" checked /> debug</label>
-      <label><input type="checkbox" value="table" checked /> table</label>
-    </div>
-    <div class="actions">
-      <button id="pause" title="Pause capture">Pause</button>
-      <button id="follow" class="on" title="Follow latest">Follow</button>
-      <button id="clear" title="Clear logs">Clear</button>
-    </div>
-  </header>
-  <main>
-    <ul id="list" class="list"></ul>
-    <section id="detail" class="detail"><p class="hint">Select an event to inspect its value.</p></section>
-  </main>
-  <footer id="status" class="status"></footer>
+  <div id="root"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -205,6 +208,9 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
 
 export function toWire(stored: StoredEvent): WireEvent {
   const file = stored.loc.file;
+  const table: ConsoleTablePayload | undefined =
+    stored.event.t === 'log' && stored.event.level === 'table' ? stored.event.table : undefined;
+
   return {
     key: stored.key,
     kind: stored.event.t,
@@ -216,7 +222,8 @@ export function toWire(stored: StoredEvent): WireEvent {
     line: stored.loc.line,
     count: stored.event.count,
     ts: stored.event.ts,
-    remapped: stored.remapped
+    remapped: stored.remapped,
+    ...(table ? { table } : {})
   };
 }
 

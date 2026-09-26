@@ -97,6 +97,7 @@ export class EventStore {
     this.countsByProbe.clear();
     this.lineHistory.clear();
     this.probeHistory.clear();
+    this.totalAdded = 0;
     this.emitter.emit('cleared', {} as Record<string, never>);
   }
 
