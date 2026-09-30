@@ -71,11 +71,28 @@ export interface ConsoleTableRow {
   cells: SerializedValue[];
 }
 
+/**
+ * Hard limits for a normalized `console.table` payload. Shared by the agent
+ * (which must stay inside them) and `validateEvent` (which enforces them), so
+ * the two can never drift apart and get a whole batch rejected.
+ */
+export const TABLE_MAX_ROWS = 1_000;
+export const TABLE_MAX_COLUMNS = 256;
+/** Longest row key / column label. Longer labels are clipped by the agent. */
+export const TABLE_MAX_LABEL_LENGTH = 1_024;
+
 export interface ConsoleTablePayload {
   /** Displayed data columns, excluding the implicit `(index)` column. */
   columns: string[];
   rows: ConsoleTableRow[];
+  /** True when rows, columns or cell contents were dropped to stay within limits. */
   truncated?: boolean;
+  /** Rows in the source data, when that is more than `rows.length`. */
+  totalRows?: number;
+  /** Columns in the source data, when that is more than `columns.length`. */
+  totalColumns?: number;
+  /** Label for the leading index column; `console.table` uses "iteration index" for Map/Set. */
+  indexLabel?: string;
 }
 
 export interface LogEvent extends BaseEvent {
@@ -383,10 +400,10 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
         const rows = x.table.rows;
         if (
           !Array.isArray(columns) ||
-          columns.length > 256 ||
-          !columns.every((column) => typeof column === 'string' && column.length <= 1024) ||
+          columns.length > TABLE_MAX_COLUMNS ||
+          !columns.every((column) => typeof column === 'string' && column.length <= TABLE_MAX_LABEL_LENGTH) ||
           !Array.isArray(rows) ||
-          rows.length > 1_000
+          rows.length > TABLE_MAX_ROWS
         ) {
           return fail('bad-message', 'log.table has an invalid shape');
         }
@@ -394,7 +411,7 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
           if (
             !isPlainRecord(row) ||
             typeof row.key !== 'string' ||
-            row.key.length > 1024 ||
+            row.key.length > TABLE_MAX_LABEL_LENGTH ||
             !Array.isArray(row.cells) ||
             row.cells.length !== columns.length ||
             !row.cells.every((cell) => validateSerializedValue(cell))
@@ -402,10 +419,20 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
             return fail('bad-message', 'log.table.rows contains an invalid row');
           }
         }
+        const totalRows = x.table.totalRows;
+        const totalColumns = x.table.totalColumns;
+        const indexLabel = x.table.indexLabel;
         ev.table = {
           columns: columns as string[],
           rows: rows as Array<{ key: string; cells: SerializedValue[] }>,
-          truncated: x.table.truncated === true ? true : undefined
+          truncated: x.table.truncated === true ? true : undefined,
+          ...(typeof indexLabel === 'string' && indexLabel.length <= 64 ? { indexLabel } : {}),
+          ...(typeof totalRows === 'number' && Number.isSafeInteger(totalRows) && totalRows >= rows.length
+            ? { totalRows }
+            : {}),
+          ...(typeof totalColumns === 'number' && Number.isSafeInteger(totalColumns) && totalColumns >= columns.length
+            ? { totalColumns }
+            : {})
         };
       }
       if (Array.isArray(x.exprs) && x.exprs.length <= 64 && x.exprs.every((e) => typeof e === 'string' && e.length <= 4096)) {

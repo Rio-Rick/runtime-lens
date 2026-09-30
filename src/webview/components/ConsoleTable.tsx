@@ -1,155 +1,146 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { ConsoleTableRow, SerializedValue } from '../../protocol';
-import { preview } from '../../serialization/preview';
-
-export type TableSortDirection = 'asc' | 'desc';
+import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import type { ConsoleTablePayload, ConsoleTableRow } from '../../protocol';
+import {
+  INDEX_COLUMN,
+  WINDOWING_THRESHOLD,
+  buildTableModel,
+  buildTsv,
+  cellDetail,
+  cellText,
+  filterRows,
+  sortRows,
+  windowRange,
+  type SortSpec
+} from '../table-model';
 
 export interface ConsoleTableProps {
-  columns: string[];
-  rows: ConsoleTableRow[];
-  sortKey: string;
-  sortDirection: TableSortDirection;
-  onSort: (column: string) => void;
-  onCopyTable?: (text: string) => void;
+  table: ConsoleTablePayload;
+  /** Called with text to put on the clipboard (the host owns the clipboard). */
+  onCopy: (text: string, label: string) => void;
 }
 
-function compareValues(left: SerializedValue | undefined, right: SerializedValue | undefined): number {
-  if (left?.k === 'number' && right?.k === 'number' && typeof left.v === 'number' && typeof right.v === 'number') {
-    return left.v - right.v;
-  }
+const ROW_HEIGHT = 24; // keep in sync with --rl-row-h in style.css
+const DEFAULT_WIDTH = 160;
+const INDEX_WIDTH = 96;
+const MIN_WIDTH = 60;
 
-  const a = preview(left ?? { k: 'undefined' }, { maxLength: 1_000, depth: 2 });
-  const b = preview(right ?? { k: 'undefined' }, { maxLength: 1_000, depth: 2 });
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+interface ResizeHandlers {
+  onResizeStart: (event: React.PointerEvent<HTMLElement>) => void;
+  onResizeMove: (event: React.PointerEvent<HTMLElement>) => void;
+  onResizeEnd: () => void;
+  onResizeKey: (event: React.KeyboardEvent<HTMLElement>) => void;
 }
 
-function sortRows(rows: ConsoleTableRow[], columns: string[], sortKey: string, direction: TableSortDirection): ConsoleTableRow[] {
-  const columnIndex = columns.indexOf(sortKey);
-  if (columnIndex < 0 && sortKey !== '(index)') {
-    return rows;
-  }
-
-  return rows
-    .map((row, index) => ({ row, index }))
-    .sort((a, b) => {
-      const comparison =
-        sortKey === '(index)'
-          ? a.row.key.localeCompare(b.row.key, undefined, { numeric: true, sensitivity: 'base' })
-          : compareValues(a.row.cells[columnIndex], b.row.cells[columnIndex]);
-
-      if (comparison !== 0) {
-        return direction === 'asc' ? comparison : -comparison;
-      }
-      return a.index - b.index;
-    })
-    .map(({ row }) => row);
-}
-
-function cellText(value: SerializedValue | undefined): string {
-  return preview(value ?? { k: 'undefined' }, {
-    maxLength: 500,
-    depth: 3,
-    quoteStrings: false
-  });
-}
-
-function tableCellText(value: SerializedValue | undefined): string {
-  return cellText(value).replace(/[\t\r\n]+/g, ' ');
-}
-
-function buildTsv(columns: string[], rows: ConsoleTableRow[]): string {
-  const lines = [
-    ['(index)', ...columns].map((value) => tableCellText({ k: 'string', v: value })).join('\t')
-  ];
-
-  for (const row of rows) {
-    lines.push([
-      row.key,
-      ...columns.map((_, index) => tableCellText(row.cells[index]))
-    ].join('\t'));
-  }
-
-  return lines.join('\n');
-}
-
-export function ConsoleTable({
-  columns,
-  rows,
-  sortKey,
-  sortDirection,
-  onSort,
-  onCopyTable
-}: ConsoleTableProps): React.ReactElement {
+/**
+ * Interactive grid for one `console.table` call.
+ *
+ * All per-payload work (search index, sort keys) lives in `table-model.ts` and
+ * is memoised on the payload, so typing in the search box or scrolling never
+ * re-walks the data. Rows are windowed once the table is large, so a
+ * 1000 x 256 table puts a few dozen rows in the DOM instead of ~256,000 cells.
+ * Columns are identified by *position*, never by name: property names such as
+ * `(index)`, `Value` or `__proto__` can't collide with anything.
+ */
+export function ConsoleTable({ table, onCopy }: ConsoleTableProps): React.ReactElement {
+  const model = useMemo(() => buildTableModel(table), [table]);
   const [search, setSearch] = useState('');
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
-  const resizeRef = useRef<{ key: string; startX: number; startWidth: number } | null>(null);
+  const deferredSearch = useDeferredValue(search);
+  const [sort, setSort] = useState<SortSpec | null>(null);
+  const [widths, setWidths] = useState<ReadonlyMap<number, number>>(new Map());
+  const [inspected, setInspected] = useState<{ row: number; column: number } | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(480);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ column: number; startX: number; startWidth: number } | null>(null);
 
-  const sortedRows = useMemo(
-    () => sortRows(rows, columns, sortKey, sortDirection),
-    [columns, rows, sortKey, sortDirection]
-  );
+  const filtered = useMemo(() => filterRows(model, deferredSearch), [model, deferredSearch]);
+  const ordered = useMemo(() => sortRows(model, filtered, sort), [model, filtered, sort]);
 
-  const filteredRows = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    if (needle.length === 0) {
-      return sortedRows;
-    }
-
-    return sortedRows.filter((row) => {
-      if (row.key.toLowerCase().includes(needle)) {
-        return true;
-      }
-      for (const cell of row.cells) {
-        if (cellText(cell).toLowerCase().includes(needle)) {
-          return true;
-        }
-      }
-      return false;
-    });
-  }, [search, sortedRows]);
-
+  // Track the scroll container's height. The observer is disconnected on unmount.
   useEffect(() => {
-    if (!resizeRef.current) {
+    const element = wrapRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') {
       return undefined;
     }
-
-    const onMouseMove = (event: MouseEvent): void => {
-      const active = resizeRef.current;
-      if (!active) {
-        return;
-      }
-
-      const nextWidth = Math.max(80, active.startWidth + event.clientX - active.startX);
-      setColumnWidths((current) => ({ ...current, [active.key]: nextWidth }));
-    };
-
-    const onMouseUp = (): void => {
-      resizeRef.current = null;
-      document.body.style.removeProperty('cursor');
-      document.body.style.removeProperty('user-select');
-    };
-
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
+    const observer = new ResizeObserver(() => setViewportHeight(element.clientHeight));
+    observer.observe(element);
+    setViewportHeight(element.clientHeight);
+    return () => observer.disconnect();
   }, []);
 
-  function startResize(key: string, event: React.MouseEvent<HTMLButtonElement>): void {
-    event.preventDefault();
-    event.stopPropagation();
-    const target = event.currentTarget.parentElement;
-    const width = target?.getBoundingClientRect().width ?? 120;
-    resizeRef.current = { key, startX: event.clientX, startWidth: width };
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }
+  // A new sort/filter can shrink the list below the current scroll position.
+  useEffect(() => {
+    if (wrapRef.current && wrapRef.current.scrollTop > 0) {
+      wrapRef.current.scrollTop = 0;
+      setScrollTop(0);
+    }
+  }, [sort, deferredSearch]);
 
-  function copyTable(): void {
-    onCopyTable?.(buildTsv(columns, filteredRows));
-  }
+  const widthOf = useCallback(
+    (column: number) => widths.get(column) ?? (column === INDEX_COLUMN ? INDEX_WIDTH : DEFAULT_WIDTH),
+    [widths]
+  );
+
+  const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => setScrollTop(event.currentTarget.scrollTop), []);
+
+  const toggleSort = useCallback((column: number) => {
+    setSort((current) =>
+      current?.column === column
+        ? { column, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+        : { column, direction: 'asc' }
+    );
+  }, []);
+
+  // ---- column resizing: pointer capture, so there are no document listeners to clean up
+  const setWidth = useCallback((column: number, width: number) => {
+    setWidths((current) => new Map(current).set(column, Math.max(MIN_WIDTH, Math.round(width))));
+  }, []);
+  const resize = useMemo<ResizeHandlers>(
+    () => ({
+      onResizeStart(event) {
+        const column = Number(event.currentTarget.dataset.col);
+        event.preventDefault();
+        event.stopPropagation();
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        drag.current = { column, startX: event.clientX, startWidth: widthOf(column) };
+      },
+      onResizeMove(event) {
+        const active = drag.current;
+        if (active) {
+          setWidth(active.column, active.startWidth + event.clientX - active.startX);
+        }
+      },
+      onResizeEnd() {
+        drag.current = null;
+      },
+      onResizeKey(event) {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          const column = Number(event.currentTarget.dataset.col);
+          setWidth(column, widthOf(column) + (event.key === 'ArrowRight' ? 16 : -16));
+        }
+      }
+    }),
+    [setWidth, widthOf]
+  );
+
+  // ---- one delegated click handler instead of a closure per cell
+  const onBodyClick = useCallback((event: React.MouseEvent<HTMLTableSectionElement>) => {
+    const cell = (event.target as HTMLElement).closest<HTMLElement>('td[data-r]');
+    if (cell) {
+      setInspected({ row: Number(cell.dataset.r), column: Number(cell.dataset.c) });
+    }
+  }, []);
+
+  const total = table.rows.length;
+  const windowed = ordered.length > WINDOWING_THRESHOLD;
+  const { start, end } = windowed
+    ? windowRange({ scrollTop, viewportHeight, rowHeight: ROW_HEIGHT, total: ordered.length })
+    : { start: 0, end: ordered.length };
+  const visible = ordered.slice(start, end);
+  const columnCount = model.columns.length;
+  const tableWidth = widthOf(INDEX_COLUMN) + model.columns.reduce((sum, _, c) => sum + widthOf(c), 0);
+  const inspectedRow = inspected ? table.rows[inspected.row] : undefined;
 
   return (
     <div className="rl-table-shell">
@@ -162,111 +153,186 @@ export function ConsoleTable({
           onChange={(event) => setSearch(event.target.value)}
           aria-label="Search table rows"
         />
-        <span className="meta">
-          {filteredRows.length === sortedRows.length
-            ? `${sortedRows.length} rows`
-            : `${filteredRows.length} / ${sortedRows.length} rows`}
+        <span className="meta" aria-live="polite">
+          {ordered.length === total ? `${total} rows` : `${ordered.length} / ${total} rows`}
+          {table.totalRows !== undefined && table.totalRows > total ? ` (of ${table.totalRows})` : ''}
+          {table.totalColumns !== undefined && table.totalColumns > columnCount ? ` · ${columnCount}+ columns` : ''}
         </span>
         <button
           type="button"
           className="rl-table-action"
-          onClick={copyTable}
-          disabled={filteredRows.length === 0}
-          title={search ? 'Copy filtered rows as TSV' : 'Copy table as TSV'}
+          disabled={ordered.length === 0}
+          title={search ? 'Copy the matching rows as TSV' : 'Copy the table as TSV'}
+          onClick={() => onCopy(buildTsv(model, ordered), 'table')}
         >
           Copy table
         </button>
       </div>
 
-      <div className="rl-table-wrap" role="region" aria-label="Console table" tabIndex={0}>
-        <table className="rl-table">
+      <div className="rl-table-wrap" ref={wrapRef} onScroll={onScroll} role="region" aria-label="Console table" tabIndex={0}>
+        <table className="rl-table" style={{ width: tableWidth }}>
           <colgroup>
-            <col style={{ width: `${columnWidths['(index)'] ?? 96}px` }} />
-            {columns.map((column) => (
-              <col key={column} style={{ width: `${columnWidths[column] ?? 160}px` }} />
+            <col style={{ width: widthOf(INDEX_COLUMN) }} />
+            {model.columns.map((_, c) => (
+              <col key={c} style={{ width: widthOf(c) }} />
             ))}
           </colgroup>
           <thead>
             <tr>
-              <TableHeader
-                label="(index)"
-                sortKey="(index)"
-                active={sortKey === '(index)'}
-                direction={sortDirection}
-                onSort={onSort}
-                onResize={startResize}
-              />
-              {columns.map((column) => (
-                <TableHeader
-                  key={column}
-                  label={column}
-                  sortKey={column}
-                  active={sortKey === column}
-                  direction={sortDirection}
-                  onSort={onSort}
-                  onResize={startResize}
-                />
+              <Header label={table.indexLabel ?? '(index)'} column={INDEX_COLUMN} sort={sort} onSort={toggleSort} {...resize} />
+              {model.columns.map((label, c) => (
+                <Header key={c} label={label} column={c} sort={sort} onSort={toggleSort} {...resize} />
               ))}
             </tr>
           </thead>
-          <tbody>
-            {filteredRows.length > 0 ? (
-              filteredRows.map((row) => (
-                <tr key={row.key}>
-                  <td className="rl-table-index">{row.key}</td>
-                  {columns.map((column, index) => (
-                    <td key={`${column}:${row.key}:${index}`} title={cellText(row.cells[index])}>
-                      {cellText(row.cells[index])}
-                    </td>
-                  ))}
-                </tr>
-              ))
-            ) : (
+          <tbody onClick={onBodyClick}>
+            {windowed && start > 0 ? <Spacer height={start * ROW_HEIGHT} span={columnCount + 1} /> : null}
+            {visible.map((rowIndex) => (
+              <Row
+                key={rowIndex}
+                rowIndex={rowIndex}
+                row={table.rows[rowIndex]}
+                columnCount={columnCount}
+                selectedColumn={inspected?.row === rowIndex ? inspected.column : undefined}
+              />
+            ))}
+            {windowed && end < ordered.length ? (
+              <Spacer height={(ordered.length - end) * ROW_HEIGHT} span={columnCount + 1} />
+            ) : null}
+            {ordered.length === 0 ? (
               <tr>
-                <td className="rl-table-empty" colSpan={columns.length + 1}>
-                  No rows match “{search}”.
+                <td className="rl-table-empty" colSpan={columnCount + 1}>
+                  {total === 0 ? 'Empty table: console.table received no rows.' : `No rows match “${deferredSearch}”.`}
                 </td>
               </tr>
-            )}
+            ) : null}
           </tbody>
         </table>
       </div>
+
+      {inspected && inspectedRow ? (
+        <Inspector
+          title={`row ${inspectedRow.key} · ${model.columns[inspected.column] ?? ''}`}
+          text={cellDetail(inspectedRow.cells[inspected.column])}
+          onCopy={(text) => onCopy(text, 'cell')}
+          onClose={() => setInspected(null)}
+        />
+      ) : null}
     </div>
   );
 }
 
-interface TableHeaderProps {
+// ------------------------------------------------------------------ pieces
+
+interface HeaderProps extends ResizeHandlers {
   label: string;
-  sortKey: string;
-  active: boolean;
-  direction: TableSortDirection;
-  onSort: (column: string) => void;
-  onResize: (column: string, event: React.MouseEvent<HTMLButtonElement>) => void;
+  column: number;
+  sort: SortSpec | null;
+  onSort: (column: number) => void;
 }
 
-function TableHeader({ label, sortKey, active, direction, onSort, onResize }: TableHeaderProps): React.ReactElement {
-  const marker = active ? (direction === 'asc' ? ' ▲' : ' ▼') : '';
-
+const Header = memo(function Header({
+  label,
+  column,
+  sort,
+  onSort,
+  onResizeStart,
+  onResizeMove,
+  onResizeEnd,
+  onResizeKey
+}: HeaderProps): React.ReactElement {
+  const direction = sort?.column === column ? sort.direction : undefined;
   return (
-    <th aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+    <th aria-sort={direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none'}>
       <div className="rl-table-header">
-        <button
-          className="rl-table-sort"
-          type="button"
-          title={`Sort by ${label}`}
-          onClick={() => onSort(sortKey)}
-        >
-          <span>{label}</span>
-          <span aria-hidden="true">{marker}</span>
+        <button className="rl-table-sort" type="button" title={`Sort by ${label}`} onClick={() => onSort(column)}>
+          <span className="rl-table-label">{label}</span>
+          <span aria-hidden="true">{direction === 'asc' ? ' ▲' : direction === 'desc' ? ' ▼' : ''}</span>
         </button>
-        <button
+        <span
           className="rl-table-resize"
-          type="button"
+          role="separator"
+          aria-orientation="vertical"
           aria-label={`Resize ${label} column`}
-          title={`Resize ${label} column`}
-          onMouseDown={(event) => onResize(sortKey, event)}
+          tabIndex={0}
+          data-col={column}
+          onPointerDown={onResizeStart}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeEnd}
+          onPointerCancel={onResizeEnd}
+          onLostPointerCapture={onResizeEnd}
+          onKeyDown={onResizeKey}
         />
       </div>
     </th>
+  );
+});
+
+const Spacer = memo(function Spacer({ height, span }: { height: number; span: number }): React.ReactElement {
+  return (
+    <tr className="rl-spacer" aria-hidden="true" style={{ height }}>
+      <td colSpan={span} />
+    </tr>
+  );
+});
+
+interface RowProps {
+  rowIndex: number;
+  row: ConsoleTableRow;
+  columnCount: number;
+  selectedColumn: number | undefined;
+}
+
+const Row = memo(function Row({ rowIndex, row, columnCount, selectedColumn }: RowProps): React.ReactElement {
+  const cells: React.ReactElement[] = [];
+  for (let c = 0; c < columnCount; c++) {
+    const value = row.cells[c];
+    const text = cellText(value);
+    cells.push(
+      <td
+        key={c}
+        data-r={rowIndex}
+        data-c={c}
+        className={`rl-cell rl-cell-${value?.k ?? 'undefined'}${selectedColumn === c ? ' is-selected' : ''}`}
+        title={text.length > 40 ? text : undefined}
+      >
+        {text}
+      </td>
+    );
+  }
+  return (
+    <tr>
+      <td className="rl-table-index" title={row.key.length > 12 ? row.key : undefined}>
+        {row.key}
+      </td>
+      {cells}
+    </tr>
+  );
+});
+
+function Inspector({
+  title,
+  text,
+  onCopy,
+  onClose
+}: {
+  title: string;
+  text: string;
+  onCopy: (text: string) => void;
+  onClose: () => void;
+}): React.ReactElement {
+  return (
+    <div className="rl-inspector" role="region" aria-label="Cell value">
+      <div className="rl-inspector-bar">
+        <span className="meta">{title}</span>
+        <button type="button" onClick={() => onCopy(text)}>
+          Copy
+        </button>
+        <button type="button" onClick={onClose} aria-label="Close cell value">
+          ✕
+        </button>
+      </div>
+      <pre className="value">{text}</pre>
+    </div>
   );
 }

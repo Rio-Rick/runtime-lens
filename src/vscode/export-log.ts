@@ -4,6 +4,8 @@ import { eventText } from './render';
 
 export interface ExportedEvent {
   key: number;
+  /** Entry number since the last Clear (matches what the Explorer/Webview showed). */
+  index: number;
   kind: 'log' | 'expr' | 'error';
   level?: LogLevel;
   text: string;
@@ -82,6 +84,7 @@ export function buildExportPayload(events: readonly StoredEvent[], options: Buil
     totalEvents: chronological.length,
     events: chronological.map((stored) => ({
       key: stored.key,
+      index: stored.index,
       kind: stored.event.t,
       level: stored.event.t === 'log' ? stored.event.level : undefined,
       text: eventText(stored.event, 20_000, 6),

@@ -1,9 +1,18 @@
 import * as vscode from 'vscode';
-import type { ConsoleTablePayload, LogLevel, SerializedValue } from '../protocol';
+import { LOG_LEVELS, type ConsoleTablePayload, type LogLevel } from '../protocol';
 import type { EventStore, StoredEvent } from '../runtime/store';
+import { logger } from '../utils/logger';
 import { eventText } from '../vscode/render';
 import { toPlainText } from '../serialization/preview';
 import { throttle } from '../utils/throttle';
+import {
+  parseWebviewMessage,
+  type DetailMessage,
+  type DetailMissingMessage,
+  type HostMessage,
+  type SnapshotMessage,
+  type WireEvent
+} from './messages';
 
 export interface PanelHostActions {
   reveal(file: string, line: number): void;
@@ -11,27 +20,6 @@ export interface PanelHostActions {
   setPaused(paused: boolean): void;
   isPaused(): boolean;
   setFilter(query: string, levels: LogLevel[] | undefined): void;
-}
-
-interface WireTable {
-  columns: string[];
-  rows: Array<{ key: string; cells: SerializedValue[] }>;
-  truncated?: boolean;
-}
-
-interface WireEvent {
-  key: number;
-  kind: string;
-  level?: string;
-  text: string;
-  detail: string;
-  file: string;
-  short: string;
-  line: number;
-  count: number;
-  ts: number;
-  remapped: boolean;
-  table?: WireTable;
 }
 
 /**
@@ -49,6 +37,9 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
   private follow = true;
+  private disposed = false;
+  /** Wire form of events already sent; stored events are immutable, so it never goes stale. */
+  private wireCache = new Map<number, WireEvent>();
   private readonly push = throttle(() => this.sendSnapshot(), 120);
 
   static show(
@@ -76,6 +67,11 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
     return RuntimeExplorerPanel.current;
   }
 
+  /** Re-send state after something outside the panel changed it (e.g. Pause from the palette). */
+  static refreshCurrent(): void {
+    RuntimeExplorerPanel.current?.push.flush();
+  }
+
   private constructor(
     panel: vscode.WebviewPanel,
     private readonly extensionUri: vscode.Uri,
@@ -93,82 +89,80 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
     this.sendSnapshot();
   }
 
-  private onMessage(message: unknown): void {
-    if (typeof message !== 'object' || message === null) {
+  private onMessage(raw: unknown): void {
+    const msg = parseWebviewMessage(raw);
+    if (!msg) {
+      // A message the contract doesn't allow is a bug on one side: say so.
+      logger.warn(`ignored malformed webview message: ${safeType(raw)}`);
       return;
     }
-    const msg = message as {
-      type?: string;
-      query?: string;
-      levels?: string[];
-      key?: number;
-      follow?: boolean;
-      paused?: boolean;
-      text?: string;
-    };
     switch (msg.type) {
       case 'ready':
         this.sendSnapshot();
         return;
-      case 'filter':
-        this.actions.setFilter(String(msg.query ?? ''), (msg.levels as LogLevel[] | undefined)?.length ? (msg.levels as LogLevel[]) : undefined);
+      case 'filter': {
+        const levels = msg.levels.filter((level): level is LogLevel => (LOG_LEVELS as readonly string[]).includes(level));
+        this.actions.setFilter(msg.query, levels.length > 0 ? levels : undefined);
         this.push.flush();
         return;
+      }
       case 'clear':
         this.actions.clear();
         return;
       case 'pause':
-        this.actions.setPaused(msg.paused === true);
+        this.actions.setPaused(msg.paused);
         this.push.flush();
         return;
       case 'follow':
-        this.follow = msg.follow === true;
+        this.follow = msg.follow;
+        return;
+      case 'select':
+        this.post(toDetail(this.store.find(msg.key)) ?? missing(msg.key));
         return;
       case 'reveal': {
-        const stored = this.find(msg.key);
+        const stored = this.store.find(msg.key);
         if (stored) {
           this.actions.reveal(stored.loc.file, stored.loc.line);
         }
         return;
       }
       case 'copy': {
-        const stored = this.find(msg.key);
+        const stored = this.store.find(msg.key);
         if (stored) {
           void vscode.env.clipboard.writeText(detailOf(stored));
           void vscode.window.showInformationMessage('Runtime Lens: value copied to clipboard.');
         }
         return;
       }
-      case 'copy-table': {
-        if (typeof msg.text !== 'string' || msg.text.length === 0) {
-          return;
-        }
+      case 'copy-text':
         void vscode.env.clipboard.writeText(msg.text);
-        void vscode.window.showInformationMessage('Runtime Lens: table copied to clipboard.');
-        return;
-      }
-      default:
+        void vscode.window.showInformationMessage(`Runtime Lens: ${msg.label} copied to clipboard.`);
         return;
     }
-  }
-
-  private find(key: number | undefined): StoredEvent | undefined {
-    if (key === undefined) {
-      return undefined;
-    }
-    return this.store.list(2000).find((item) => item.key === key);
   }
 
   private sendSnapshot(): void {
-    const events: WireEvent[] = this.store.list(400).map(toWire);
-    void this.panel.webview.postMessage({
+    const next = new Map<number, WireEvent>();
+    for (const stored of this.store.list(400)) {
+      next.set(stored.key, this.wireCache.get(stored.key) ?? toWire(stored));
+    }
+    this.wireCache = next;
+    const message: SnapshotMessage = {
       type: 'snapshot',
-      events,
+      events: [...next.values()],
       follow: this.follow,
       paused: this.actions.isPaused(),
       filter: this.store.filter.query,
       stats: this.store.stats()
-    });
+    };
+    this.post(message);
+  }
+
+  /** Posting to a disposed webview throws; a throttled callback can race disposal. */
+  private post(message: HostMessage): void {
+    if (!this.disposed) {
+      void this.panel.webview.postMessage(message);
+    }
   }
 
   private render(): string {
@@ -197,6 +191,8 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.wireCache.clear();
     RuntimeExplorerPanel.current = undefined;
     this.push.cancel();
     this.panel.dispose();
@@ -206,6 +202,7 @@ export class RuntimeExplorerPanel implements vscode.Disposable {
   }
 }
 
+/** The small, list-row form of an event. No values travel here: see `toDetail`. */
 export function toWire(stored: StoredEvent): WireEvent {
   const file = stored.loc.file;
   const table: ConsoleTablePayload | undefined =
@@ -213,18 +210,52 @@ export function toWire(stored: StoredEvent): WireEvent {
 
   return {
     key: stored.key,
+    index: stored.index,
     kind: stored.event.t,
     level: stored.event.t === 'log' ? stored.event.level : undefined,
     text: eventText(stored.event, 300, 2),
-    detail: detailOf(stored),
     file,
     short: file.split('/').slice(-2).join('/'),
     line: stored.loc.line,
     count: stored.event.count,
     ts: stored.event.ts,
     remapped: stored.remapped,
-    ...(table ? { table } : {})
+    ...(table
+      ? {
+          table: {
+            rows: table.rows.length,
+            columns: table.columns.length,
+            ...(table.truncated ? { truncated: true } : {}),
+            ...(table.totalRows !== undefined ? { totalRows: table.totalRows } : {}),
+            ...(table.totalColumns !== undefined ? { totalColumns: table.totalColumns } : {}),
+            ...(table.indexLabel ? { indexLabel: table.indexLabel } : {})
+          }
+        }
+      : {})
   };
+}
+
+/**
+ * The heavy part of an event (its full text, or its table rows), built only
+ * for the one event a person selected instead of for every event on every
+ * snapshot.
+ */
+export function toDetail(stored: StoredEvent | undefined): DetailMessage | undefined {
+  if (!stored) {
+    return undefined;
+  }
+  const table = stored.event.t === 'log' && stored.event.level === 'table' ? stored.event.table : undefined;
+  return table
+    ? { type: 'detail', key: stored.key, detail: '', table }
+    : { type: 'detail', key: stored.key, detail: detailOf(stored) };
+}
+
+function missing(key: number): DetailMissingMessage {
+  return { type: 'detail-missing', key };
+}
+
+function safeType(raw: unknown): string {
+  return typeof raw === 'object' && raw !== null && 'type' in raw ? String((raw as { type: unknown }).type) : typeof raw;
 }
 
 function detailOf(stored: StoredEvent): string {

@@ -43,7 +43,11 @@ copyDir(path.join(root, 'src', 'webview', 'media'), path.join(out, 'webview', 'm
 const esbuild = path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'esbuild.cmd' : 'esbuild');
 // 2b. Bundle the React Webview separately from the extension host.
 // React/ReactDOM are bundled into this browser artifact, so the installed
-// extension does not depend on a CDN or a UI framework runtime at page load.
+// extension does not depend on a CDN or a UI framework runtime at page load
+// (which is why they are devDependencies). NODE_ENV must be defined: without
+// it React ships its ~1 MB development build. Styling is the plain
+// `media/style.css` copied above and linked by panel.ts, so the entry point
+// imports no CSS (importing it would emit a second, unused main.css).
 const webviewEntry = path.join(root, 'src', 'webview', 'main.tsx');
 const webviewTarget = path.join(out, 'webview', 'media', 'main.js');
 fs.mkdirSync(path.dirname(webviewTarget), { recursive: true });
@@ -56,6 +60,8 @@ execFileSync(
     '--platform=browser',
     '--target=es2020',
     '--legal-comments=none',
+    '--minify',
+    '--define:process.env.NODE_ENV="production"',
     `--outfile=${webviewTarget}`
   ],
   { stdio: 'inherit', cwd: root }

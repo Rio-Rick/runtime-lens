@@ -4,8 +4,19 @@ import { TypedEmitter } from '../utils/events';
 import { normalizePath } from '../utils/paths';
 
 export interface StoredEvent {
-  /** Monotonic id assigned by the store (stable for tree items). */
+  /**
+   * Internal identity: monotonic for the life of the store and deliberately
+   * *never* reset by `clear()`. Tree item ids, React keys and the webview's
+   * selection all hang off it, so reusing a number after Clear would let a
+   * stale UI element match a brand-new event.
+   */
   key: number;
+  /**
+   * Display ordinal: 1-based position in the capture since the last Clear.
+   * This is what to show a person ("#3"); it restarts at 1 after Clear and
+   * never depends on entries that were cleared.
+   */
+  index: number;
   event: RuntimeEvent;
   sessionId: string;
   /** Location after source-map remapping. */
@@ -76,13 +87,13 @@ export class EventStore {
   add(entries: Array<{ event: RuntimeEvent; sessionId: string; loc: SourceLocation; remapped: boolean }>): StoredEvent[] {
     const stored: StoredEvent[] = [];
     for (const entry of entries) {
-      const item: StoredEvent = { key: this.nextKey++, ...entry };
+      this.totalAdded++;
+      const item: StoredEvent = { key: this.nextKey++, index: this.totalAdded, ...entry };
       const evicted = this.buffer.push(item);
       this.indexAdded(item);
       if (evicted) {
         this.indexRemoved(evicted);
       }
-      this.totalAdded++;
       stored.push(item);
     }
     if (stored.length > 0) {
@@ -99,6 +110,16 @@ export class EventStore {
     this.probeHistory.clear();
     this.totalAdded = 0;
     this.emitter.emit('cleared', {} as Record<string, never>);
+  }
+
+  /** Look an event up by its internal key, ignoring the active filter. */
+  find(key: number): StoredEvent | undefined {
+    for (const item of this.buffer.reversed()) {
+      if (item.key === key) {
+        return item;
+      }
+    }
+    return undefined;
   }
 
   /** Newest-first list honouring the active filter. */

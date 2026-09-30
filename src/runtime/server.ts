@@ -53,6 +53,16 @@ export interface RuntimeServerOptions {
 const DEFAULT_MAX_PAYLOAD = 256 * 1024;
 
 /**
+ * Per-probe execution-count bookkeeping for one session. `last` is the most
+ * recent count the agent reported; `base` is what `last` was when the user
+ * pressed Clear. Displayed counts are `count - base`.
+ */
+interface ProbeCount {
+  last: number;
+  base: number;
+}
+
+/**
  * Localhost-only ingest server.
  *
  * Security posture (this listens on a developer machine, so it matters):
@@ -71,6 +81,8 @@ export class RuntimeServer {
   private wss: WebSocketServer | undefined;
   private readonly sessions = new Map<string, SessionInfo>();
   private readonly sockets = new Map<WebSocket, string>();
+  /** Keyed by the session object so the bookkeeping dies with the session. */
+  private readonly probeCounts = new WeakMap<SessionInfo, Map<string, ProbeCount>>();
   private tokenValue = '';
   private portValue = 0;
   private running = false;
@@ -228,6 +240,53 @@ export class RuntimeServer {
   }
 
   /**
+   * Start every counter over, for "Clear": per-session event/dropped totals,
+   * the server's running total, and the execution counts (`× N`) of every
+   * probe.
+   *
+   * The agent-side counts can't simply be zeroed from here — agents on the
+   * HTTP transport have no receive channel, and events already in flight when
+   * Clear is pressed still carry their old counts. So the server remembers
+   * where each probe's count stood and re-bases later events against it (see
+   * `rebase`). `broadcastReset` additionally zeroes live WebSocket agents;
+   * `rebase` notices that (the count drops below the baseline) and stops
+   * subtracting.
+   */
+  resetCounters(): void {
+    this.totalEvents = 0;
+    for (const session of this.sessions.values()) {
+      session.eventCount = 0;
+      session.droppedByAgent = 0;
+      for (const count of this.probeCounts.get(session)?.values() ?? []) {
+        count.base = count.last;
+      }
+    }
+  }
+
+  /** Display counts relative to the last Clear. Never mutates the input events. */
+  private rebase(session: SessionInfo, events: RuntimeEvent[]): RuntimeEvent[] {
+    let counts = this.probeCounts.get(session);
+    if (!counts) {
+      counts = new Map();
+      this.probeCounts.set(session, counts);
+    }
+    return events.map((event) => {
+      let entry = counts.get(event.id);
+      if (!entry) {
+        entry = { last: 0, base: 0 };
+        counts.set(event.id, entry);
+      }
+      if (entry.base > 0 && event.count <= entry.base) {
+        // The agent's counter restarted (live reset, or the process did):
+        // the baseline no longer applies.
+        entry.base = 0;
+      }
+      entry.last = event.count;
+      return entry.base > 0 ? { ...event, count: event.count - entry.base } : event;
+    });
+  }
+
+  /**
    * Tell every connected agent to zero its per-probe execution counters
    * (see `ServerResetMessage`). Called when the user clears the log —
    * without this, a probe's `× N` counter would keep counting up from its
@@ -254,8 +313,8 @@ export class RuntimeServer {
 
   /**
    * Sessions that `broadcastReset` cannot reach because they connected over
-   * the receive-less HTTP transport. Their agent-side counters will keep
-   * incrementing from their pre-clear values until that process restarts.
+   * the receive-less HTTP transport. Their agent-side counters keep
+   * incrementing; `resetCounters` compensates by re-basing what they report.
    */
   sessionsUnreachableForReset(): SessionInfo[] {
     return [...this.sessions.values()].filter((s) => s.transport === 'http');
@@ -531,7 +590,7 @@ export class RuntimeServer {
         this.totalEvents += message.events.length;
         this.emitter.emit('events', {
           sessionId: message.sessionId,
-          events: message.events,
+          events: this.rebase(session, message.events),
           dropped: message.dropped ?? 0
         });
         return message.events.length;

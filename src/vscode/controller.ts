@@ -273,19 +273,13 @@ export class RuntimeLensController implements vscode.Disposable {
     this.diagnostics.clear();
     this.decorations.refresh();
     this.statusBar.setCounters(this.server?.listSessions().length ?? 0, 0);
-    // The `× N` execution count on each probe is computed in the *agent's*
-    // process, not derived from the history we just cleared, so it has to be
-    // reset there too or the next event just resumes the old count.
+    // Session/probe counters live in the server and the agents, not in the
+    // store we just cleared, so they must be reset there too or the next
+    // event just resumes the old totals (`resetCounters`), and live agents
+    // are told to restart their own `× N` counts (`broadcastReset`).
+    this.server?.resetCounters();
     this.server?.broadcastReset();
-    const unreachable = this.server?.sessionsUnreachableForReset() ?? [];
-    if (unreachable.length > 0) {
-      const labels = unreachable.map((s) => s.label).join(', ');
-      logger.warn(`clear: ${unreachable.length} HTTP-connected session(s) can't be live-reset: ${labels}`);
-      void vscode.window.showWarningMessage(
-        `Runtime Lens: cleared. ${unreachable.length} session(s) connected over HTTP (${labels}) can't receive a ` +
-          'live reset — their execution counts will keep going until that process restarts.'
-      );
-    }
+    this.explorer.setSessions(this.server?.listSessions() ?? []);
     logger.info('logs cleared');
   }
 
@@ -294,6 +288,7 @@ export class RuntimeLensController implements vscode.Disposable {
     this.explorer.setPaused(paused);
     this.server?.broadcastConfig();
     void vscode.commands.executeCommand('setContext', 'runtimeLens.paused', paused);
+    RuntimeExplorerPanel.refreshCurrent();
     if (paused) {
       this.statusBar.setState('paused', 'Capture paused; the agent keeps running.');
     } else {

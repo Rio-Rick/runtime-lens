@@ -360,7 +360,10 @@ describe('runtime/store', () => {
     assert.equal(store.stats().totalAdded, 1);
     assert.equal(store.stats().size, 1);
     assert.equal(store.forFile('/p/a.ts').length, 1);
-    assert.deepEqual(store.forFile('/p/a.ts').map((e) => e.loc.line), [3, 9]);
+    // Bug fixed here: this used to assert [3, 9] — the pre-clear lines — so a
+    // regression that made post-clear state depend on cleared history would
+    // pass silently. The store must hold only what was added since clear().
+    assert.deepEqual(store.forFile('/p/a.ts').map((e) => e.loc.line), [11]);
     assert.equal(store.forFile('/p/other.ts').length, 0);
   });
 

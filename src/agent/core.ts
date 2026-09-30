@@ -12,7 +12,8 @@
  */
 import { PROTOCOL_VERSION, parseServerMessage, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
 import { serialize } from '../serialization/serializer';
-import type { ConsoleTablePayload, SerializedValue } from '../protocol';
+import { utf8ByteLength } from '../utils/bytes';
+import { isTableSource, normalizeConsoleTable } from './console-table';
 
 export interface AgentTransport {
   /** Send one already-serialized JSON string. Must not throw. */
@@ -78,12 +79,24 @@ export const DEFAULT_AGENT_CONFIG: Omit<AgentConfig, 'sessionId' | 'token' | 'la
 /**
  * Approximate on-wire size of one event as JSON, used to keep a batch under
  * its byte budget without re-stringifying the whole batch on every push.
- * `Buffer.byteLength` (not `.length`) because JSON is emitted as UTF-8 and
- * multi-byte characters would otherwise be undercounted.
+ * UTF-8 bytes (not `.length`) because JSON is emitted as UTF-8 and multi-byte
+ * characters would otherwise be undercounted. Deliberately not `Buffer`: this
+ * file is bundled for browsers too, where `Buffer` does not exist.
  */
 function approxEventBytes(event: RuntimeEvent): number {
-  return Buffer.byteLength(JSON.stringify(event), 'utf8') + 1; // +1 for the array separator
+  return utf8ByteLength(JSON.stringify(event)) + 1; // +1 for the array separator
 }
+
+/**
+ * `console.table` carries its full data in `event.table`, so its `args` only
+ * feed one-line previews and the tree view. Serializing the same (possibly
+ * huge) value twice at full fidelity would double both the CPU and the bytes
+ * on the wire.
+ */
+const TABLE_ARG_SERIALIZE = { maxEntries: 25, maxNodes: 500, maxStringLength: 200 } as const;
+
+/** Share of a batch's byte budget one table may use (the rest is args/envelope/other events). */
+const TABLE_BUDGET_SHARE = 0.6;
 
 export class Agent {
   private readonly buffer: RuntimeEvent[] = [];
@@ -186,9 +199,11 @@ export class Agent {
     try {
       if (!this.disabled && !this.paused && this.config.captureConsole) {
         const count = this.bump(id);
-        const serializedArgs = args.map((a) =>
-          serialize(a, { depth: this.config.objectDepth, maxStringLength: this.config.maxStringLength })
+        const serializeOptions = { depth: this.config.objectDepth, maxStringLength: this.config.maxStringLength };
+        const serializedArgs = args.map((a, index) =>
+          serialize(a, level === 'table' && index === 0 ? { ...serializeOptions, ...TABLE_ARG_SERIALIZE } : serializeOptions)
         );
+        const table = level === 'table' ? this.buildTable(args) : undefined;
         this.push({
           t: 'log',
           id,
@@ -198,7 +213,7 @@ export class Agent {
           level,
           loc: { file, line, column },
           args: serializedArgs,
-          ...(level === 'table' ? { table: normalizeConsoleTable(args, this.config.objectDepth, this.config.maxStringLength) } : {})
+          ...(table ? { table } : {})
         });
       }
     } catch {
@@ -264,6 +279,40 @@ export class Agent {
     }
   }
 
+  /**
+   * `undefined` means "not really a table": real `console.table` only grids
+   * arrays, plain objects, Maps and Sets, and prints anything else (a
+   * primitive, `null`, a bare function) the way `console.log` would. The
+   * caller then keeps the event but leaves off `.table`, so the Webview shows
+   * the normal one-line preview instead of a fabricated one-row grid.
+   */
+  private buildTable(args: unknown[]): ReturnType<typeof normalizeConsoleTable> | undefined {
+    if (!isTableSource(args[0])) {
+      return undefined;
+    }
+    try {
+      return normalizeConsoleTable(args, {
+        depth: this.config.objectDepth,
+        maxStringLength: this.config.maxStringLength,
+        maxBytes: Math.max(2048, Math.floor(this.config.maxBatchBytes * TABLE_BUDGET_SHARE))
+      });
+    } catch (err) {
+      // The normalizer guards every intrinsic a hostile value can break, so
+      // reaching here means a bug in it. Keep the event (and its args) and
+      // show *why* the table is missing instead of dropping the whole call.
+      return {
+        columns: ['Value'],
+        rows: [
+          {
+            key: '0',
+            cells: [{ k: 'unserializable', hint: `console.table could not be displayed: ${errorText(err)}` }]
+          }
+        ],
+        truncated: true
+      };
+    }
+  }
+
   private bump(id: string): number {
     const next = (this.counts.get(id) ?? 0) + 1;
     this.counts.set(id, next);
@@ -287,16 +336,19 @@ export class Agent {
       return;
     }
     while (this.buffer.length > 0) {
-      const events = this.takeNextBatch();
-      const batch: BatchMessage = {
-        t: 'batch',
-        v: PROTOCOL_VERSION,
-        sessionId: this.config.sessionId,
-        events,
-        dropped: this.dropped > 0 ? this.dropped : undefined
-      };
-      this.dropped = 0;
+      // Runs from a timer inside the user's process: a throw here would be an
+      // uncaught exception in *their* app. Per rule 3 a failure disables the
+      // agent instead.
       try {
+        const events = this.takeNextBatch();
+        const batch: BatchMessage = {
+          t: 'batch',
+          v: PROTOCOL_VERSION,
+          sessionId: this.config.sessionId,
+          events,
+          dropped: this.dropped > 0 ? this.dropped : undefined
+        };
+        this.dropped = 0;
         this.transport.send(JSON.stringify(batch));
       } catch {
         this.disabled = true;
@@ -355,130 +407,12 @@ export class Agent {
 }
 
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function safeObjectKeys(value: object): string[] {
+function errorText(err: unknown): string {
   try {
-    return Object.keys(value);
+    return (err instanceof Error ? err.message : String(err)).slice(0, 200);
   } catch {
-    return [];
+    return 'unknown error';
   }
-}
-
-function safeGet(value: unknown, key: string): unknown {
-  try {
-    return (value as Record<string, unknown>)[key];
-  } catch (err) {
-    return new Error(`<throwing getter: ${err instanceof Error ? err.message : String(err)}>`);
-  }
-}
-
-function serializeTableCell(value: unknown, depth: number, maxStringLength: number): SerializedValue {
-  return serialize(value, { depth, maxStringLength });
-}
-
-/**
- * Convert the arguments passed to console.table into a bounded, rectangular
- * payload that the Webview can sort/render without knowing about runtime
- * object shapes.
- *
- * `console.table(data, columns)` is intentionally supported: a string[] second
- * argument limits the displayed columns just like the native console API.
- */
-function normalizeConsoleTable(
-  args: unknown[],
-  depth: number,
-  maxStringLength: number
-): ConsoleTablePayload {
-  const input = args[0];
-  const requestedColumns = Array.isArray(args[1])
-    ? args[1].filter((column): column is string => typeof column === 'string').slice(0, 256)
-    : undefined;
-
-  const rows: Array<{ key: string; source: unknown }> = [];
-
-  if (Array.isArray(input)) {
-    for (let i = 0; i < Math.min(input.length, 1000); i++) {
-      rows.push({ key: String(i), source: input[i] });
-    }
-  } else if (isRecord(input)) {
-    for (const key of safeObjectKeys(input).slice(0, 1000)) {
-      rows.push({ key, source: safeGet(input, key) });
-    }
-  } else {
-    rows.push({ key: '0', source: input });
-  }
-
-  let columns: string[] = [];
-  const objectLikeRows = rows.length > 0 && rows.some(({ source }) => Array.isArray(source) || isRecord(source));
-  const primitiveRows = rows.some(({ source }) => !Array.isArray(source) && !isRecord(source));
-
-  if (objectLikeRows) {
-    const seen = new Set<string>();
-    for (const { source } of rows) {
-      if (Array.isArray(source)) {
-        for (let i = 0; i < Math.min(source.length, 256); i++) {
-          const key = String(i);
-          if (!seen.has(key)) {
-            seen.add(key);
-            columns.push(key);
-          }
-        }
-      } else if (isRecord(source)) {
-        for (const key of safeObjectKeys(source).slice(0, 256)) {
-          if (!seen.has(key)) {
-            seen.add(key);
-            columns.push(key);
-          }
-        }
-      }
-      if (columns.length >= 256) {
-        break;
-      }
-    }
-    if (primitiveRows && !columns.includes('Value')) {
-      columns.unshift('Value');
-    }
-  } else {
-    columns = ['Value'];
-  }
-
-  if (requestedColumns) {
-    const allowed = new Set(requestedColumns);
-    columns = columns.filter((column) => allowed.has(column));
-  }
-
-  // For a top-level object with primitive values, preserve the useful
-  // `(index) | Value` shape. For arrays/objects-of-objects, cells map directly
-  // to the collected property columns.
-  const normalizedRows = rows.map(({ key, source }) => ({
-    key,
-    cells: columns.map((column) => {
-      if (column === 'Value' && primitiveRows && !Array.isArray(source) && !isRecord(source)) {
-        return serializeTableCell(source, depth, maxStringLength);
-      }
-      if (columns.length === 1 && columns[0] === 'Value') {
-        return serializeTableCell(source, depth, maxStringLength);
-      }
-      if (Array.isArray(source)) {
-        const index = Number(column);
-        return serializeTableCell(Number.isInteger(index) ? source[index] : undefined, depth, maxStringLength);
-      }
-      return serializeTableCell(isRecord(source) ? safeGet(source, column) : undefined, depth, maxStringLength);
-    })
-  }));
-
-  return {
-    columns,
-    rows: normalizedRows,
-    truncated: (Array.isArray(input) && input.length > rows.length) ||
-      (isRecord(input) && safeObjectKeys(input).length > rows.length) ||
-      columns.length >= 256
-      ? true
-      : undefined
-  };
 }
 
 /** A no-op stand-in used when no editor endpoint is configured. */

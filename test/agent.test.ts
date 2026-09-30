@@ -130,10 +130,14 @@ describe('agent/core (console interception)', () => {
     const event = transport.events().find((item) => item.id === 'table-1') as LogEvent;
     assert.equal(event.level, 'table');
     assert.ok(event.table);
-    assert.deepEqual(event.table?.columns, ['Value', 'name', 'age', 'language']);
-    assert.deepEqual(event.table?.rows.map((row) => row.key), ['0', '1', '2']);
+    // `['ignored-by-shape']` is the real `console.table(data, columns)` filter
+    // argument, not a no-op: verified against Node's own console.table, it
+    // restricts the columns to exactly the requested list (even ones no row
+    // has), rather than being ignored.
+    assert.deepEqual(event.table?.columns, ['ignored-by-shape']);
+    assert.deepEqual(event.table?.rows.map((row) => row.key), ['0', '1']);
     assert.equal(event.table?.rows[0].cells[0].k, 'undefined');
-    assert.deepEqual(event.table?.rows[1].cells.map((cell) => cell.k), ['undefined', 'string', 'number', 'string']);
+    assert.equal(event.table?.rows[1].cells[0].k, 'undefined');
   });
 
   it('uses the current console method when the application patches it after agent startup', () => {

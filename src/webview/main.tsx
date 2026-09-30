@@ -1,139 +1,137 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { SerializedValue } from '../protocol';
-import { ConsoleTable, type TableSortDirection } from './components/ConsoleTable';
-import './media/style.css';
+import { ConsoleTable } from './components/ConsoleTable';
+import { parseHostMessage, type WebviewMessage, type WireEvent } from './messages';
+import { initialState, reduce, shouldStopFollowing } from './view-state';
 
 declare function acquireVsCodeApi(): {
-  postMessage(message: unknown): void;
+  postMessage(message: WebviewMessage): void;
 };
 
-interface TablePayload {
-  columns: string[];
-  rows: Array<{ key: string; cells: SerializedValue[] }>;
-  truncated?: boolean;
-}
-
-interface WireEvent {
-  key: number;
-  kind: string;
-  level?: string;
-  text: string;
-  detail: string;
-  file: string;
-  short: string;
-  line: number;
-  count: number;
-  ts: number;
-  remapped: boolean;
-  table?: TablePayload;
-}
-
-interface SnapshotMessage {
-  type: 'snapshot';
-  events: WireEvent[];
-  follow: boolean;
-  paused: boolean;
-  filter: string;
-  stats: {
-    size: number;
-    capacity: number;
-    dropped: number;
-    totalAdded: number;
-  };
-}
-
+// `acquireVsCodeApi` may only be called once per Webview.
 const vscode = acquireVsCodeApi();
+const post = (message: WebviewMessage): void => vscode.postMessage(message);
+
+const LEVELS = ['log', 'info', 'warn', 'error', 'debug', 'table'] as const;
+const KNOWN_HOST_TYPES = new Set(['snapshot', 'detail', 'detail-missing']);
+/** Wait for typing to pause before asking the host to re-filter (the host also refreshes the tree). */
+const FILTER_DEBOUNCE_MS = 150;
+
+interface EventRowProps {
+  event: WireEvent;
+  selected: boolean;
+  onSelect: (key: number) => void;
+  onReveal: (key: number) => void;
+}
+
+/** Memoised: snapshots reuse unchanged event objects, so untouched rows skip rendering. */
+const EventRow = memo(function EventRow({ event, selected, onSelect, onReveal }: EventRowProps): React.ReactElement {
+  return (
+    <button
+      className={`event-row ${selected ? 'selected' : ''}`}
+      type="button"
+      onClick={() => onSelect(event.key)}
+      onDoubleClick={() => onReveal(event.key)}
+    >
+      <span className="glyph">
+        {event.kind === 'expr' ? '?' : event.kind === 'error' ? '✖' : event.table ? '▦' : '›'}
+      </span>
+      <span className="index" title="Entry number since the last Clear">
+        #{event.index}
+      </span>
+      <span className="text">{event.text}</span>
+      <span className="meta">
+        {event.short}:{event.line}
+        {event.count > 1 ? ` ×${event.count}` : ''}
+        {event.remapped ? ' ↺' : ''}
+      </span>
+    </button>
+  );
+});
 
 function App(): React.ReactElement {
-  const [events, setEvents] = useState<WireEvent[]>([]);
-  const [selectedKey, setSelectedKey] = useState<number | null>(null);
-  const [paused, setPaused] = useState(false);
-  const [follow, setFollow] = useState(true);
-  const [stats, setStats] = useState<SnapshotMessage['stats']>({
-    size: 0,
-    capacity: 0,
-    dropped: 0,
-    totalAdded: 0
-  });
-  const [sortKey, setSortKey] = useState('(index)');
-  const [sortDirection, setSortDirection] = useState<TableSortDirection>('asc');
+  const [state, dispatch] = useReducer(reduce, undefined, initialState);
   const [query, setQuery] = useState('');
-  const [levels, setLevels] = useState<string[]>(['log', 'info', 'warn', 'error', 'debug', 'table']);
-
-  const selected = useMemo(
-    () => events.find((event) => event.key === selectedKey),
-    [events, selectedKey]
-  );
-
-  const visibleEvents = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return events.filter((event) => {
-      const levelMatches = levels.includes(event.level ?? '');
-      const textMatches = needle.length === 0 || `${event.text} ${event.file}`.toLowerCase().includes(needle);
-      return levelMatches && textMatches;
-    });
-  }, [events, levels, query]);
-
+  const [levels, setLevels] = useState<readonly string[]>(LEVELS);
+  const filterTimer = useRef<number | undefined>(undefined);
+  /** The last text filter the host is known to have (sent by us, or adopted from it). */
+  const hostFilter = useRef('');
+  const latest = useRef(state);
   useEffect(() => {
-    const handleMessage = (message: MessageEvent<SnapshotMessage>) => {
-      const data = message.data;
-      if (!data || data.type !== 'snapshot') {
+    latest.current = state;
+  });
+
+  // One listener for the life of the Webview, removed on unmount.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent<unknown>): void => {
+      const message = parseHostMessage(event.data);
+      if (!message) {
+        const type = (event.data as { type?: unknown } | null)?.type;
+        if (typeof type === 'string' && KNOWN_HOST_TYPES.has(type)) {
+          console.error('Runtime Lens: ignored malformed host message', type);
+        }
         return;
       }
-
-      setEvents(data.events ?? []);
-      setPaused(Boolean(data.paused));
-      setFollow(Boolean(data.follow));
-      setStats(data.stats ?? { size: 0, capacity: 0, dropped: 0, totalAdded: 0 });
-
-      setSelectedKey((current) => {
-        if (data.events.length === 0) {
-          return null;
-        }
-        return current !== null && data.events.some((event) => event.key === current)
-          ? current
-          : data.events[0].key;
-      });
+      switch (message.type) {
+        case 'snapshot':
+          dispatch({ type: 'snapshot', message });
+          break;
+        case 'detail':
+          dispatch({ type: 'detail', message });
+          break;
+        case 'detail-missing':
+          dispatch({ type: 'detail-missing', key: message.key });
+          break;
+      }
     };
-
-    window.addEventListener('message', handleMessage);
-    vscode.postMessage({ type: 'ready' });
-    return () => window.removeEventListener('message', handleMessage);
+    window.addEventListener('message', onMessage);
+    post({ type: 'ready' });
+    return () => window.removeEventListener('message', onMessage);
   }, []);
 
+  useEffect(() => () => window.clearTimeout(filterTimer.current), []);
+
+  // Adopt a filter that was changed on the host side (e.g. the command palette),
+  // but never echo back what we sent ourselves: that would fight the user's typing.
   useEffect(() => {
-    if (!follow || visibleEvents.length === 0) {
-      return;
+    if (state.filter !== hostFilter.current) {
+      hostFilter.current = state.filter;
+      setQuery(state.filter);
     }
-    setSelectedKey((current) => current ?? visibleEvents[0].key);
-  }, [follow, visibleEvents]);
+  }, [state.filter]);
 
-  const activeSelected = selected ?? visibleEvents[0];
+  const sendFilter = useCallback((nextQuery: string, nextLevels: readonly string[]) => {
+    hostFilter.current = nextQuery;
+    post({ type: 'filter', query: nextQuery, levels: nextLevels.length === LEVELS.length ? [] : [...nextLevels] });
+  }, []);
 
-  function toggleSort(column: string): void {
-    if (sortKey === column) {
-      setSortDirection((current) => (current === 'asc' ? 'desc' : 'asc'));
-      return;
+  // Ask the host for the selected event's heavy payload (table rows / full text) once.
+  const { selectedKey } = state;
+  const hasDetail = selectedKey !== null && state.details.has(selectedKey);
+  const isMissing = selectedKey !== null && state.missing.has(selectedKey);
+  useEffect(() => {
+    if (selectedKey !== null && !hasDetail && !isMissing) {
+      post({ type: 'select', key: selectedKey });
     }
-    setSortKey(column);
-    setSortDirection('asc');
-  }
+  }, [selectedKey, hasDetail, isMissing]);
 
-  function setPausedValue(value: boolean): void {
-    setPaused(value);
-    vscode.postMessage({ type: 'pause', paused: value });
-  }
+  const select = useCallback((key: number) => {
+    if (shouldStopFollowing(latest.current, key)) {
+      post({ type: 'follow', follow: false });
+    }
+    dispatch({ type: 'select', key });
+  }, []);
+  const reveal = useCallback((key: number) => post({ type: 'reveal', key }), []);
+  const copyText = useCallback((text: string, label: string) => post({ type: 'copy-text', text, label }), []);
 
-  function setFollowValue(value: boolean): void {
-    setFollow(value);
-    vscode.postMessage({ type: 'follow', follow: value });
-  }
-
-  function clear(): void {
-    setSelectedKey(null);
-    vscode.postMessage({ type: 'clear' });
-  }
+  // While the newly selected event's detail is in flight, keep showing the last
+  // one instead of blanking the pane (with Follow on, that would flicker).
+  const detail =
+    selectedKey !== null
+      ? state.details.get(selectedKey) ?? [...state.details.values()].pop()
+      : undefined;
+  const shown = detail ? state.events.find((event) => event.key === detail.key) : undefined;
+  const { stats } = state;
 
   return (
     <div className="rl-shell">
@@ -146,40 +144,52 @@ function App(): React.ReactElement {
           onChange={(event) => {
             const next = event.target.value;
             setQuery(next);
-            vscode.postMessage({ type: 'filter', query: next, levels: levels.length === 6 ? [] : levels });
+            window.clearTimeout(filterTimer.current);
+            filterTimer.current = window.setTimeout(() => sendFilter(next, levels), FILTER_DEBOUNCE_MS);
           }}
         />
 
         <div className="levels" aria-label="Console levels">
-          {['log', 'info', 'warn', 'error', 'debug', 'table'].map((level) => {
-            const checked = levels.includes(level);
-            return (
-              <label key={level}>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={(event) => {
-                    const next = event.target.checked
-                      ? [...new Set([...levels, level])]
-                      : levels.filter((item) => item !== level);
-                    setLevels(next);
-                    vscode.postMessage({ type: 'filter', query, levels: next.length === 6 ? [] : next });
-                  }}
-                />
-                {level}
-              </label>
-            );
-          })}
+          {LEVELS.map((level) => (
+            <label key={level}>
+              <input
+                type="checkbox"
+                checked={levels.includes(level)}
+                onChange={(event) => {
+                  const next = event.target.checked ? LEVELS.filter((l) => l === level || levels.includes(l)) : levels.filter((l) => l !== level);
+                  setLevels(next);
+                  window.clearTimeout(filterTimer.current);
+                  sendFilter(query, next);
+                }}
+              />
+              {level}
+            </label>
+          ))}
         </div>
 
         <div className="actions">
-          <button type="button" className={paused ? 'on' : ''} onClick={() => setPausedValue(!paused)}>
-            {paused ? 'Resume' : 'Pause'}
+          <button
+            type="button"
+            className={state.paused ? 'on' : ''}
+            onClick={() => {
+              dispatch({ type: 'set-paused', value: !state.paused });
+              post({ type: 'pause', paused: !state.paused });
+            }}
+          >
+            {state.paused ? 'Resume' : 'Pause'}
           </button>
-          <button type="button" className={follow ? 'on' : ''} onClick={() => setFollowValue(!follow)}>
+          <button
+            type="button"
+            className={state.follow ? 'on' : ''}
+            title="Keep the newest entry selected"
+            onClick={() => {
+              dispatch({ type: 'set-follow', value: !state.follow });
+              post({ type: 'follow', follow: !state.follow });
+            }}
+          >
             Follow
           </button>
-          <button type="button" onClick={clear}>
+          <button type="button" onClick={() => post({ type: 'clear' })}>
             Clear
           </button>
         </div>
@@ -187,75 +197,56 @@ function App(): React.ReactElement {
 
       <main>
         <section className="list" aria-label="Runtime events">
-          {visibleEvents.map((event) => (
-            <button
-              className={`event-row ${event.key === activeSelected?.key ? 'selected' : ''}`}
-              key={event.key}
-              type="button"
-              onClick={() => setSelectedKey(event.key)}
-              onDoubleClick={() => vscode.postMessage({ type: 'reveal', key: event.key })}
-            >
-              <span className="glyph">
-                {event.kind === 'expr' ? '?' : event.kind === 'error' ? '✖' : event.level === 'table' ? '▦' : '›'}
-              </span>
-              <span className="text">{event.text}</span>
-              <span className="meta">
-                {event.short}:{event.line}
-                {event.count > 1 ? ` ×${event.count}` : ''}
-                {event.remapped ? ' ↺' : ''}
-              </span>
-            </button>
+          {state.events.length === 0 ? (
+            <p className="hint">No entries yet. Run a process with Runtime Lens attached.</p>
+          ) : null}
+          {state.events.map((event) => (
+            <EventRow key={event.key} event={event} selected={event.key === selectedKey} onSelect={select} onReveal={reveal} />
           ))}
         </section>
 
         <section className="detail" aria-label="Event details">
-          {activeSelected ? (
+          {shown && detail ? (
             <>
               <div className="detail-toolbar">
-                <button type="button" onClick={() => vscode.postMessage({ type: 'reveal', key: activeSelected.key })}>
+                <button type="button" onClick={() => post({ type: 'reveal', key: shown.key })}>
                   Go to source
                 </button>
-                <button type="button" onClick={() => vscode.postMessage({ type: 'copy', key: activeSelected.key })}>
+                <button type="button" onClick={() => post({ type: 'copy', key: shown.key })}>
                   Copy value
                 </button>
                 <span className="meta">
-                  {activeSelected.file}:{activeSelected.line} · {new Date(activeSelected.ts).toLocaleTimeString()}
+                  #{shown.index} · {shown.file}:{shown.line} · {new Date(shown.ts).toLocaleTimeString()}
                 </span>
               </div>
 
-              {activeSelected.table ? (
+              {detail.table ? (
                 <div className="table-panel">
                   <div className="table-heading">
                     <span>console.table</span>
                     <span className="meta">
-                      {activeSelected.table.rows.length} rows · {activeSelected.table.columns.length} columns
-                      {activeSelected.table.truncated ? ' · truncated' : ''}
+                      {detail.table.rows.length} rows · {detail.table.columns.length} columns
+                      {detail.table.truncated ? ' · truncated' : ''}
                     </span>
                   </div>
-                  <ConsoleTable
-                    key={activeSelected.key}
-                    columns={activeSelected.table.columns}
-                    rows={activeSelected.table.rows}
-                    sortKey={sortKey}
-                    sortDirection={sortDirection}
-                    onSort={toggleSort}
-                    onCopyTable={(text) => vscode.postMessage({ type: 'copy-table', text })}
-                  />
+                  <ConsoleTable key={detail.key} table={detail.table} onCopy={copyText} />
                 </div>
               ) : (
-                <pre className="value">{activeSelected.detail}</pre>
+                <pre className="value">{detail.detail}</pre>
               )}
             </>
+          ) : selectedKey !== null && isMissing ? (
+            <p className="hint">This entry is no longer available.</p>
           ) : (
-            <p className="hint">Select an event to inspect its value.</p>
+            <p className="hint">{state.events.length === 0 ? 'Nothing to inspect yet.' : 'Select an event to inspect its value.'}</p>
           )}
         </section>
       </main>
 
       <footer className="status">
-        {visibleEvents.length} shown · {stats.size}/{stats.capacity} buffered · {stats.totalAdded} total
+        {state.events.length} shown · {stats.size}/{stats.capacity} buffered · {stats.totalAdded} total
         {stats.dropped ? ` · ${stats.dropped} dropped` : ''}
-        {paused ? ' · PAUSED' : ''}
+        {state.paused ? ' · PAUSED' : ''}
       </footer>
     </div>
   );
