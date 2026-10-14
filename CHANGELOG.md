@@ -8,6 +8,28 @@ All notable changes to Runtime Lens are documented in this file. The format foll
 
 ### Added
 
+- **Run history for repeated probes.** An inline value used to show only the latest result and a
+  `× N` count, so earlier values were invisible. Now:
+  - the hover lists the last `runtimeLens.hoverHistory` runs of that probe (newest first,
+    consecutive identical values collapsed to `#2–#4 \`20\` ×3`);
+  - inline text appends `(was X)` when the value changed since the previous run
+    (`runtimeLens.showPreviousValue`);
+  - numeric probes also show `min` / `max` and a sparkline of the last 8 values, and the hover adds
+    the average (`runtimeLens.showValueStats`). These are accumulated per event in O(1), so they
+    cover the whole run rather than only the retained history.
+- **"Open all runs" link in the hover** (`runtimeLens.showProbeHistory`, not in the palette because
+  it takes an argument). It scopes the Runtime Explorer — tree and panel — to every retained run of
+  that one `console.log` / probe, newest first, and opens the panel; selecting a run shows its full
+  value. The panel shows a "Show all" bar to leave the scope; the tree's description says
+  `history of file.ts:12`. Empty *Search / Filter Events* and *Clear* also leave the scope.
+- Diagnostics now report inline repaint timing (last / slowest ms).
+
+### Changed
+
+- Inline decorations are only built for lines in (or within 100 lines of) the viewport and are
+  cached per event, so a repaint rebuilds only lines whose latest value changed (or that were
+  edited / scrolled into view) instead of every probed line in the file.
+
 - **`Disconnect Session` command (`runtimeLens.disconnectSession`).** Closes a session's live
   connection (if it still has one) and clears it from the Runtime Lens view — for cleaning up a
   zombie session left behind by a process that crashed or was force-killed without sending its
