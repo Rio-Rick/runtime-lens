@@ -64,12 +64,45 @@ export interface BaseEvent {
   count: number;
 }
 
+export interface ConsoleTableRow {
+  /** Stable row key (usually the source object's array/index/property key). */
+  key: string;
+  /** Cells align 1:1 with `ConsoleTablePayload.columns` after the index column. */
+  cells: SerializedValue[];
+}
+
+/**
+ * Hard limits for a normalized `console.table` payload. Shared by the agent
+ * (which must stay inside them) and `validateEvent` (which enforces them), so
+ * the two can never drift apart and get a whole batch rejected.
+ */
+export const TABLE_MAX_ROWS = 1_000;
+export const TABLE_MAX_COLUMNS = 256;
+/** Longest row key / column label. Longer labels are clipped by the agent. */
+export const TABLE_MAX_LABEL_LENGTH = 1_024;
+
+export interface ConsoleTablePayload {
+  /** Displayed data columns, excluding the implicit `(index)` column. */
+  columns: string[];
+  rows: ConsoleTableRow[];
+  /** True when rows, columns or cell contents were dropped to stay within limits. */
+  truncated?: boolean;
+  /** Rows in the source data, when that is more than `rows.length`. */
+  totalRows?: number;
+  /** Columns in the source data, when that is more than `columns.length`. */
+  totalColumns?: number;
+  /** Label for the leading index column; `console.table` uses "iteration index" for Map/Set. */
+  indexLabel?: string;
+}
+
 export interface LogEvent extends BaseEvent {
   t: 'log';
   level: LogLevel;
   args: SerializedValue[];
   /** Raw expression text of each argument, as written in source. */
   exprs?: string[];
+  /** Normalized payload emitted for `console.table(...)`. */
+  table?: ConsoleTablePayload;
 }
 
 export interface ExprEvent extends BaseEvent {
@@ -359,6 +392,49 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
         return fail('bad-message', 'log.args must be an array of serialized values');
       }
       const ev: LogEvent = { ...base, t: 'log', level: x.level as LogLevel, args: x.args as SerializedValue[] };
+      if (x.table !== undefined) {
+        if (x.level !== 'table' || !isPlainRecord(x.table)) {
+          return fail('bad-message', 'log.table is only valid for console.table');
+        }
+        const columns = x.table.columns;
+        const rows = x.table.rows;
+        if (
+          !Array.isArray(columns) ||
+          columns.length > TABLE_MAX_COLUMNS ||
+          !columns.every((column) => typeof column === 'string' && column.length <= TABLE_MAX_LABEL_LENGTH) ||
+          !Array.isArray(rows) ||
+          rows.length > TABLE_MAX_ROWS
+        ) {
+          return fail('bad-message', 'log.table has an invalid shape');
+        }
+        for (const row of rows) {
+          if (
+            !isPlainRecord(row) ||
+            typeof row.key !== 'string' ||
+            row.key.length > TABLE_MAX_LABEL_LENGTH ||
+            !Array.isArray(row.cells) ||
+            row.cells.length !== columns.length ||
+            !row.cells.every((cell) => validateSerializedValue(cell))
+          ) {
+            return fail('bad-message', 'log.table.rows contains an invalid row');
+          }
+        }
+        const totalRows = x.table.totalRows;
+        const totalColumns = x.table.totalColumns;
+        const indexLabel = x.table.indexLabel;
+        ev.table = {
+          columns: columns as string[],
+          rows: rows as Array<{ key: string; cells: SerializedValue[] }>,
+          truncated: x.table.truncated === true ? true : undefined,
+          ...(typeof indexLabel === 'string' && indexLabel.length <= 64 ? { indexLabel } : {}),
+          ...(typeof totalRows === 'number' && Number.isSafeInteger(totalRows) && totalRows >= rows.length
+            ? { totalRows }
+            : {}),
+          ...(typeof totalColumns === 'number' && Number.isSafeInteger(totalColumns) && totalColumns >= columns.length
+            ? { totalColumns }
+            : {})
+        };
+      }
       if (Array.isArray(x.exprs) && x.exprs.length <= 64 && x.exprs.every((e) => typeof e === 'string' && e.length <= 4096)) {
         ev.exprs = x.exprs as string[];
       }

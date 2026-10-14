@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { EventStore } from '../runtime/store';
 import { normalizePath } from '../utils/paths';
-import { hoverMarkdown, type RenderConfig } from './render';
+import { SHOW_PROBE_HISTORY_COMMAND, hoverExtras, hoverMarkdown, type RenderConfig } from './render';
 
 export const HOVER_LANGUAGES: vscode.DocumentSelector = [
   { language: 'javascript', scheme: 'file' },
@@ -25,9 +25,11 @@ export class RuntimeHoverProvider implements vscode.HoverProvider {
     if (!stored) {
       return undefined;
     }
-    const markdown = new vscode.MarkdownString(hoverMarkdown(stored, this.getConfig()));
+    // Built on demand: the history walk only happens for the line actually hovered.
+    const config = this.getConfig();
+    const markdown = new vscode.MarkdownString(hoverMarkdown(stored, config, hoverExtras(this.store, stored, config)));
     markdown.supportThemeIcons = true;
-    markdown.isTrusted = { enabledCommands: ['runtimeLens.showRuntimeExplorer'] };
+    markdown.isTrusted = { enabledCommands: ['runtimeLens.showRuntimeExplorer', SHOW_PROBE_HISTORY_COMMAND] };
     markdown.appendMarkdown(
       `\n\n[$(telescope) Open in Runtime Explorer](command:runtimeLens.showRuntimeExplorer)`
     );

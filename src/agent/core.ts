@@ -12,6 +12,8 @@
  */
 import { PROTOCOL_VERSION, parseServerMessage, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
 import { serialize } from '../serialization/serializer';
+import { utf8ByteLength } from '../utils/bytes';
+import { isTableSource, normalizeConsoleTable } from './console-table';
 
 export interface AgentTransport {
   /** Send one already-serialized JSON string. Must not throw. */
@@ -77,12 +79,24 @@ export const DEFAULT_AGENT_CONFIG: Omit<AgentConfig, 'sessionId' | 'token' | 'la
 /**
  * Approximate on-wire size of one event as JSON, used to keep a batch under
  * its byte budget without re-stringifying the whole batch on every push.
- * `Buffer.byteLength` (not `.length`) because JSON is emitted as UTF-8 and
- * multi-byte characters would otherwise be undercounted.
+ * UTF-8 bytes (not `.length`) because JSON is emitted as UTF-8 and multi-byte
+ * characters would otherwise be undercounted. Deliberately not `Buffer`: this
+ * file is bundled for browsers too, where `Buffer` does not exist.
  */
 function approxEventBytes(event: RuntimeEvent): number {
-  return Buffer.byteLength(JSON.stringify(event), 'utf8') + 1; // +1 for the array separator
+  return utf8ByteLength(JSON.stringify(event)) + 1; // +1 for the array separator
 }
+
+/**
+ * `console.table` carries its full data in `event.table`, so its `args` only
+ * feed one-line previews and the tree view. Serializing the same (possibly
+ * huge) value twice at full fidelity would double both the CPU and the bytes
+ * on the wire.
+ */
+const TABLE_ARG_SERIALIZE = { maxEntries: 25, maxNodes: 500, maxStringLength: 200 } as const;
+
+/** Share of a batch's byte budget one table may use (the rest is args/envelope/other events). */
+const TABLE_BUDGET_SHARE = 0.6;
 
 export class Agent {
   private readonly buffer: RuntimeEvent[] = [];
@@ -185,6 +199,11 @@ export class Agent {
     try {
       if (!this.disabled && !this.paused && this.config.captureConsole) {
         const count = this.bump(id);
+        const serializeOptions = { depth: this.config.objectDepth, maxStringLength: this.config.maxStringLength };
+        const serializedArgs = args.map((a, index) =>
+          serialize(a, level === 'table' && index === 0 ? { ...serializeOptions, ...TABLE_ARG_SERIALIZE } : serializeOptions)
+        );
+        const table = level === 'table' ? this.buildTable(args) : undefined;
         this.push({
           t: 'log',
           id,
@@ -193,9 +212,8 @@ export class Agent {
           count,
           level,
           loc: { file, line, column },
-          args: args.map((a) =>
-            serialize(a, { depth: this.config.objectDepth, maxStringLength: this.config.maxStringLength })
-          )
+          args: serializedArgs,
+          ...(table ? { table } : {})
         });
       }
     } catch {
@@ -261,6 +279,40 @@ export class Agent {
     }
   }
 
+  /**
+   * `undefined` means "not really a table": real `console.table` only grids
+   * arrays, plain objects, Maps and Sets, and prints anything else (a
+   * primitive, `null`, a bare function) the way `console.log` would. The
+   * caller then keeps the event but leaves off `.table`, so the Webview shows
+   * the normal one-line preview instead of a fabricated one-row grid.
+   */
+  private buildTable(args: unknown[]): ReturnType<typeof normalizeConsoleTable> | undefined {
+    if (!isTableSource(args[0])) {
+      return undefined;
+    }
+    try {
+      return normalizeConsoleTable(args, {
+        depth: this.config.objectDepth,
+        maxStringLength: this.config.maxStringLength,
+        maxBytes: Math.max(2048, Math.floor(this.config.maxBatchBytes * TABLE_BUDGET_SHARE))
+      });
+    } catch (err) {
+      // The normalizer guards every intrinsic a hostile value can break, so
+      // reaching here means a bug in it. Keep the event (and its args) and
+      // show *why* the table is missing instead of dropping the whole call.
+      return {
+        columns: ['Value'],
+        rows: [
+          {
+            key: '0',
+            cells: [{ k: 'unserializable', hint: `console.table could not be displayed: ${errorText(err)}` }]
+          }
+        ],
+        truncated: true
+      };
+    }
+  }
+
   private bump(id: string): number {
     const next = (this.counts.get(id) ?? 0) + 1;
     this.counts.set(id, next);
@@ -284,16 +336,19 @@ export class Agent {
       return;
     }
     while (this.buffer.length > 0) {
-      const events = this.takeNextBatch();
-      const batch: BatchMessage = {
-        t: 'batch',
-        v: PROTOCOL_VERSION,
-        sessionId: this.config.sessionId,
-        events,
-        dropped: this.dropped > 0 ? this.dropped : undefined
-      };
-      this.dropped = 0;
+      // Runs from a timer inside the user's process: a throw here would be an
+      // uncaught exception in *their* app. Per rule 3 a failure disables the
+      // agent instead.
       try {
+        const events = this.takeNextBatch();
+        const batch: BatchMessage = {
+          t: 'batch',
+          v: PROTOCOL_VERSION,
+          sessionId: this.config.sessionId,
+          events,
+          dropped: this.dropped > 0 ? this.dropped : undefined
+        };
+        this.dropped = 0;
         this.transport.send(JSON.stringify(batch));
       } catch {
         this.disabled = true;
@@ -348,6 +403,15 @@ export class Agent {
       seq: this.seq,
       disabled: this.disabled
     };
+  }
+}
+
+
+function errorText(err: unknown): string {
+  try {
+    return (err instanceof Error ? err.message : String(err)).slice(0, 200);
+  } catch {
+    return 'unknown error';
   }
 }
 

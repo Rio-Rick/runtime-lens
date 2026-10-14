@@ -92,7 +92,10 @@ export class RuntimeLensController implements vscode.Disposable {
       maxInlineLength: this.config.maxInlineLength,
       showTimestamp: this.config.showTimestamp,
       showExecutionCount: this.config.showExecutionCount,
-      objectDepth: this.config.objectDepth
+      objectDepth: this.config.objectDepth,
+      showPreviousValue: this.config.showPreviousValue,
+      showValueStats: this.config.showValueStats,
+      hoverHistory: this.config.hoverHistory
     };
   }
 
@@ -273,19 +276,13 @@ export class RuntimeLensController implements vscode.Disposable {
     this.diagnostics.clear();
     this.decorations.refresh();
     this.statusBar.setCounters(this.server?.listSessions().length ?? 0, 0);
-    // The `× N` execution count on each probe is computed in the *agent's*
-    // process, not derived from the history we just cleared, so it has to be
-    // reset there too or the next event just resumes the old count.
+    // Session/probe counters live in the server and the agents, not in the
+    // store we just cleared, so they must be reset there too or the next
+    // event just resumes the old totals (`resetCounters`), and live agents
+    // are told to restart their own `× N` counts (`broadcastReset`).
+    this.server?.resetCounters();
     this.server?.broadcastReset();
-    const unreachable = this.server?.sessionsUnreachableForReset() ?? [];
-    if (unreachable.length > 0) {
-      const labels = unreachable.map((s) => s.label).join(', ');
-      logger.warn(`clear: ${unreachable.length} HTTP-connected session(s) can't be live-reset: ${labels}`);
-      void vscode.window.showWarningMessage(
-        `Runtime Lens: cleared. ${unreachable.length} session(s) connected over HTTP (${labels}) can't receive a ` +
-          'live reset — their execution counts will keep going until that process restarts.'
-      );
-    }
+    this.explorer.setSessions(this.server?.listSessions() ?? []);
     logger.info('logs cleared');
   }
 
@@ -294,6 +291,7 @@ export class RuntimeLensController implements vscode.Disposable {
     this.explorer.setPaused(paused);
     this.server?.broadcastConfig();
     void vscode.commands.executeCommand('setContext', 'runtimeLens.paused', paused);
+    RuntimeExplorerPanel.refreshCurrent();
     if (paused) {
       this.statusBar.setState('paused', 'Capture paused; the agent keeps running.');
     } else {
@@ -327,6 +325,25 @@ export class RuntimeLensController implements vscode.Disposable {
     });
   }
 
+  /**
+   * Hover link target: scope the Explorer (tree and panel) to every retained
+   * run of one probe and bring the panel up, where selecting a run shows its
+   * full value. Replaces any text/level filter so all of the runs are visible.
+   */
+  showProbeHistory(probeId: unknown): void {
+    if (typeof probeId !== 'string' || probeId.length === 0 || probeId.length > 256) {
+      return;
+    }
+    const latest = this.store.historyOf(probeId, 1)[0];
+    if (!latest) {
+      void vscode.window.showInformationMessage('Runtime Lens: that value is no longer in the captured history.');
+      return;
+    }
+    const probeLabel = `${path.basename(latest.loc.file)}:${latest.loc.line}`;
+    this.store.setFilter({ probe: probeId, probeLabel, query: '', levels: undefined });
+    this.showExplorerPanel();
+  }
+
   async setFilter(): Promise<void> {
     const query = await vscode.window.showInputBox({
       title: 'Runtime Lens: search captured values',
@@ -336,7 +353,9 @@ export class RuntimeLensController implements vscode.Disposable {
     if (query === undefined) {
       return;
     }
-    this.store.setFilter({ query });
+    // An empty query means "clear the filter", which includes a per-value scope
+    // set from a hover; otherwise it would linger invisibly in the tree.
+    this.store.setFilter(query ? { query } : { query, probe: undefined, probeLabel: undefined });
     logger.info(`filter set to "${query}"`);
   }
 
@@ -464,6 +483,8 @@ export class RuntimeLensController implements vscode.Disposable {
     lines.push(`events (total/live) : ${stats.totalAdded}/${stats.size} (capacity ${stats.capacity}, dropped ${stats.dropped})`);
     lines.push(`probes seen         : ${stats.probes}`);
     lines.push(`decorated lines     : ${stats.lines}`);
+    const paint = this.decorations.stats();
+    lines.push(`inline repaints     : ${paint.paints} (last ${paint.lastPaintMs.toFixed(1)} ms, slowest ${paint.maxPaintMs.toFixed(1)} ms)`);
     lines.push(`diagnostics         : ${this.diagnostics.count()}`);
     lines.push(`paused              : ${this.paused}`);
     lines.push(`inline values       : ${this.config.inlineValues}`);

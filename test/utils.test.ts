@@ -174,6 +174,11 @@ describe('runtime/store indexes', () => {
     assert.equal(store.countFor('probe-0'), 0);
     assert.ok(store.latestAt('/p/f50.ts', 1));
     assert.equal(store.countFor('probe-50'), 1);
+    assert.ok(store.stats().dropped > 0);
+    store.clear();
+    assert.equal(store.stats().size, 0);
+    assert.equal(store.stats().totalAdded, 0);
+    assert.equal(store.stats().dropped, 0);
   });
 
   it('rebuilds indexes correctly when history is shrunk or expanded', () => {
@@ -347,8 +352,18 @@ describe('runtime/store', () => {
     assert.equal(store.countFor('p1'), 2);
     assert.equal(store.countFor('p2'), 1);
     assert.equal(store.countFor('unknown'), 0);
-    assert.equal(store.forFile('/p/a.ts').length, 2);
-    assert.deepEqual(store.forFile('/p/a.ts').map((e) => e.loc.line), [3, 9]);
+    assert.equal(store.stats().totalAdded, 3);
+    store.clear();
+    assert.equal(store.stats().totalAdded, 0);
+    assert.equal(store.stats().size, 0);
+    add(store, logEvent('p3', 11));
+    assert.equal(store.stats().totalAdded, 1);
+    assert.equal(store.stats().size, 1);
+    assert.equal(store.forFile('/p/a.ts').length, 1);
+    // Bug fixed here: this used to assert [3, 9] — the pre-clear lines — so a
+    // regression that made post-clear state depend on cleared history would
+    // pass silently. The store must hold only what was added since clear().
+    assert.deepEqual(store.forFile('/p/a.ts').map((e) => e.loc.line), [11]);
     assert.equal(store.forFile('/p/other.ts').length, 0);
   });
 

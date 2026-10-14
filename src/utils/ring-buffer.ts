@@ -75,6 +75,7 @@ export class RingBuffer<T> implements Iterable<T> {
     this.items = new Array<T | undefined>(this.capacityValue);
     this.head = 0;
     this.count = 0;
+    this.droppedCount = 0;
   }
 
   /** Grow/shrink in place, keeping the newest items. */

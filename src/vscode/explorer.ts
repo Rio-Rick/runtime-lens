@@ -42,7 +42,10 @@ export class RuntimeExplorerProvider implements vscode.TreeDataProvider<Explorer
       }
     });
     const cleared = this.store.emitter.on('cleared', () => this.refresh());
-    const filtered = this.store.emitter.on('filter-changed', () => this.refresh.flush());
+    const filtered = this.store.emitter.on('filter-changed', () => {
+      this.updateDescription();
+      this.refresh.flush();
+    });
     this.disposables.push(
       { dispose: () => added.dispose() },
       { dispose: () => cleared.dispose() },
@@ -85,12 +88,16 @@ export class RuntimeExplorerProvider implements vscode.TreeDataProvider<Explorer
       return;
     }
     const filter = this.store.filter.query;
+    const scope = this.store.filter.probe !== undefined ? this.store.filter.probeLabel ?? 'one value' : undefined;
     const bits: string[] = [];
     if (this.paused) {
       bits.push('paused');
     }
     if (this.follow) {
       bits.push('following');
+    }
+    if (scope) {
+      bits.push(`history of ${scope}`);
     }
     if (filter) {
       bits.push(`"${filter}"`);

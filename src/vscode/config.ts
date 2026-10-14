@@ -10,6 +10,9 @@ export interface RuntimeLensConfig {
   maxHistory: number;
   showTimestamp: boolean;
   showExecutionCount: boolean;
+  showPreviousValue: boolean;
+  showValueStats: boolean;
+  hoverHistory: number;
   port: number;
   maxPayloadBytes: number;
 }
@@ -28,6 +31,9 @@ export function readConfig(scope?: vscode.ConfigurationScope): RuntimeLensConfig
     maxHistory: clamp(c.get<number>('maxHistory', 5000), 50, 100_000),
     showTimestamp: c.get<boolean>('showTimestamp', false),
     showExecutionCount: c.get<boolean>('showExecutionCount', true),
+    showPreviousValue: c.get<boolean>('showPreviousValue', true),
+    showValueStats: c.get<boolean>('showValueStats', true),
+    hoverHistory: clamp(c.get<number>('hoverHistory', 10), 0, 50),
     port: clamp(c.get<number>('port', 0), 0, 65_535),
     maxPayloadBytes: clamp(c.get<number>('maxPayloadBytes', 262_144), 4096, 4 * 1024 * 1024)
   };

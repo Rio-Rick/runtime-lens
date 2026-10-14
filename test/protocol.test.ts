@@ -118,6 +118,45 @@ describe('protocol', () => {
     assert.equal(res.ok && (res.value as { dropped?: number }).dropped, 4);
   });
 
+  it('validates the normalized console.table payload', () => {
+    const table = logEvent({
+      level: 'table',
+      table: {
+        columns: ['name', 'age'],
+        rows: [
+          {
+            key: '0',
+            cells: [serialize('Ada'), serialize(36)]
+          }
+        ]
+      }
+    });
+
+    const valid = validateClientMessage({
+      t: 'batch',
+      v: V,
+      sessionId: 's',
+      events: [table]
+    });
+    assert.equal(valid.ok, true);
+
+    const invalid = validateClientMessage({
+      t: 'batch',
+      v: V,
+      sessionId: 's',
+      events: [
+        logEvent({
+          level: 'table',
+          table: {
+            columns: ['name'],
+            rows: [{ key: '0', cells: [serialize('Ada'), serialize(36)] }]
+          }
+        })
+      ]
+    });
+    assert.equal(invalid.ok, false);
+  });
+
   it('rejects malformed events field by field', () => {
     const cases: Array<[string, Record<string, unknown>]> = [
       ['missing id', logEvent({ id: undefined })],
