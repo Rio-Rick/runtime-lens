@@ -8,6 +8,29 @@ All notable changes to Runtime Lens are documented in this file. The format foll
 
 ### Added
 
+- **Search highlighting in the Runtime Explorer panel.** Matches of the search box are marked in the
+  event list (text and file) and in the detail pane, case-insensitively and as literal text (never a
+  pattern). Highlights follow the filter the host applied, so they always describe the list shown;
+  emptying the box clears them and restores the full list immediately instead of after the debounce.
+- **`runtimeLens.maxEntries` and `runtimeLens.maxNodes` settings.** Control how much of a large
+  object or array is captured (defaults unchanged: 100 entries per container, 5000 values per
+  captured value). Pushed live to connected agents, so they apply to values logged after the change
+  without restarting the process. `maxEntries` is capped at 1000, the most the protocol accepts.
+  Older agents ignore the new fields and keep their built-in limits.
+- **Expand all / Collapse all** buttons on each value tree. Expand all opens level by level up to
+  about 2000 rows (and says so when it stops early), so a huge payload can't freeze the panel;
+  Collapse all returns to the initial view. Individual toggles keep working afterwards.
+- **Search inside the inspected value.** The detail pane has its own *Search in value…* box with a
+  match count. It is independent of the list search (nothing is sent to the host and the list is not
+  filtered), highlights matches in the text or tree, and opens the tree nodes that contain matches
+  (a node you collapse yourself stays collapsed). `Esc` clears it. `console.table` keeps its own
+  table search.
+- **Expandable value tree in the detail pane.** Objects, arrays, Maps and Sets are shown as a
+  collapsible tree built from the values the extension already holds (so `undefined`, circular
+  references, `NaN`, BigInt etc. are shown exactly as before). A string argument that is valid JSON
+  (`{…}` / `[…]`) is shown as a tree too, tagged `JSON text`, with number literals kept verbatim.
+  Plain strings, errors, stack traces and invalid JSON keep the existing text view, as does anything
+  the Webview cannot validate. Children are rendered lazily and in pages of 100.
 - **Run history for repeated probes.** An inline value used to show only the latest result and a
   `× N` count, so earlier values were invisible. Now:
   - the hover lists the last `runtimeLens.hoverHistory` runs of that probe (newest first,

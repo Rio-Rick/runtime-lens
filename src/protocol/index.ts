@@ -174,6 +174,14 @@ export interface ServerConfigMessage {
    * own conservative built-in default.
    */
   maxPayloadBytes?: number;
+  /**
+   * Most entries the agent keeps per array/object/Map/Set (`runtimeLens.maxEntries`).
+   * Optional so an agent or host that predates it keeps its built-in default.
+   * The agent clamps it to `MAX_SERIALIZED_ENTRIES`, which `validateEvent` enforces.
+   */
+  maxEntries?: number;
+  /** Total values the agent serializes per captured value (`runtimeLens.maxNodes`). Optional, like `maxEntries`. */
+  maxNodes?: number;
 }
 
 export interface ServerErrorMessage {
@@ -244,6 +252,13 @@ function validateLocation(x: unknown): ValidationResult<SourceLocation> {
 }
 
 /**
+ * Most entries a serialized array/object/Map/Set may carry. Shared by the agent
+ * (which clamps `maxEntries` to it) and `validateSerializedValue` (which
+ * enforces it), so the two can never drift apart and get a whole batch rejected.
+ */
+export const MAX_SERIALIZED_ENTRIES = 1_000;
+
+/**
  * Structural validation of a serialized value. We deliberately do *not* try to
  * deep-clone or normalize: we only assert that `k` is a kind we can render, so
  * a malicious or buggy client cannot inject arbitrary shapes into the UI.
@@ -257,7 +272,7 @@ export function validateSerializedValue(x: unknown, depth = 0): boolean {
   const validCount = (value: unknown): value is number =>
     typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
   const validEntriesLength = (entries: unknown): entries is unknown[] =>
-    Array.isArray(entries) && entries.length <= 1_000;
+    Array.isArray(entries) && entries.length <= MAX_SERIALIZED_ENTRIES;
 
   switch (x.k) {
     case 'null':
@@ -605,6 +620,17 @@ export function validateServerMessage(raw: unknown): ValidationResult<ServerMess
         }
         maxPayloadBytes = raw.maxPayloadBytes;
       }
+      const serializeLimits: { maxEntries?: number; maxNodes?: number } = {};
+      for (const name of ['maxEntries', 'maxNodes'] as const) {
+        const limit = raw[name];
+        if (limit === undefined) {
+          continue;
+        }
+        if (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 1) {
+          return fail('bad-message', `config.${name} must be a positive number`);
+        }
+        serializeLimits[name] = Math.floor(limit);
+      }
       return {
         ok: true,
         value: {
@@ -614,7 +640,8 @@ export function validateServerMessage(raw: unknown): ValidationResult<ServerMess
           captureExpressions: raw.captureExpressions,
           paused: raw.paused,
           objectDepth: Math.floor(raw.objectDepth),
-          ...(maxPayloadBytes !== undefined ? { maxPayloadBytes } : {})
+          ...(maxPayloadBytes !== undefined ? { maxPayloadBytes } : {}),
+          ...serializeLimits
         }
       };
     }

@@ -1,7 +1,11 @@
-import React, { memo, useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ConsoleTable } from './components/ConsoleTable';
+import { Highlight } from './components/Highlight';
+import { DetailValue } from './components/ValueTree';
 import { parseHostMessage, type WebviewMessage, type WireEvent } from './messages';
+import { createMatcher, type Matcher } from './search-highlight';
+import { planDetail, searchDetail } from './tree-model';
 import { initialState, reduce, shouldStopFollowing } from './view-state';
 
 declare function acquireVsCodeApi(): {
@@ -20,12 +24,14 @@ const FILTER_DEBOUNCE_MS = 150;
 interface EventRowProps {
   event: WireEvent;
   selected: boolean;
+  /** Search matches to highlight; stable between renders until the query changes. */
+  matcher: Matcher | undefined;
   onSelect: (key: number) => void;
   onReveal: (key: number) => void;
 }
 
 /** Memoised: snapshots reuse unchanged event objects, so untouched rows skip rendering. */
-const EventRow = memo(function EventRow({ event, selected, onSelect, onReveal }: EventRowProps): React.ReactElement {
+const EventRow = memo(function EventRow({ event, selected, matcher, onSelect, onReveal }: EventRowProps): React.ReactElement {
   return (
     <button
       className={`event-row ${selected ? 'selected' : ''}`}
@@ -39,9 +45,11 @@ const EventRow = memo(function EventRow({ event, selected, onSelect, onReveal }:
       <span className="index" title="Entry number since the last Clear">
         #{event.index}
       </span>
-      <span className="text">{event.text}</span>
+      <span className="text">
+        <Highlight text={event.text} matcher={matcher} />
+      </span>
       <span className="meta">
-        {event.short}:{event.line}
+        <Highlight text={event.short} matcher={matcher} />:{event.line}
         {event.count > 1 ? ` ×${event.count}` : ''}
         {event.remapped ? ' ↺' : ''}
       </span>
@@ -133,6 +141,24 @@ function App(): React.ReactElement {
   const shown = detail ? state.events.find((event) => event.key === detail.key) : undefined;
   const { stats } = state;
 
+  // Highlight what the host actually filtered by (`state.filter`), not the keystroke in
+  // flight: the highlights then always describe the list on screen, and rows re-render
+  // once per debounce instead of once per key. An emptied box clears them at once.
+  const activeQuery = query === '' ? '' : state.filter;
+  const matcher = useMemo(() => createMatcher(activeQuery), [activeQuery]);
+
+  // The inspect pane's own search: local to the selected value, never sent to the host and
+  // never touching the list. While it is in use it replaces the list-search highlight there.
+  const [detailQuery, setDetailQuery] = useState('');
+  const deferredDetailQuery = useDeferredValue(detailQuery);
+  const detailMatcher = useMemo(() => createMatcher(deferredDetailQuery), [deferredDetailQuery]);
+  const valueDetail = detail && !detail.table ? detail : undefined;
+  const blocks = useMemo(() => (valueDetail ? planDetail(valueDetail) : undefined), [valueDetail]);
+  const found = useMemo(
+    () => (valueDetail && detailMatcher ? searchDetail(valueDetail.detail, blocks, detailMatcher) : undefined),
+    [valueDetail, blocks, detailMatcher]
+  );
+
   return (
     <div className="rl-shell">
       <header className="toolbar">
@@ -145,7 +171,12 @@ function App(): React.ReactElement {
             const next = event.target.value;
             setQuery(next);
             window.clearTimeout(filterTimer.current);
-            filterTimer.current = window.setTimeout(() => sendFilter(next, levels), FILTER_DEBOUNCE_MS);
+            if (next === '') {
+              // Clearing restores the full list right away instead of waiting out the debounce.
+              sendFilter(next, levels);
+            } else {
+              filterTimer.current = window.setTimeout(() => sendFilter(next, levels), FILTER_DEBOUNCE_MS);
+            }
           }}
         />
 
@@ -212,7 +243,14 @@ function App(): React.ReactElement {
             <p className="hint">No entries yet. Run a process with Runtime Lens attached.</p>
           ) : null}
           {state.events.map((event) => (
-            <EventRow key={event.key} event={event} selected={event.key === selectedKey} onSelect={select} onReveal={reveal} />
+            <EventRow
+              key={event.key}
+              event={event}
+              selected={event.key === selectedKey}
+              matcher={matcher}
+              onSelect={select}
+              onReveal={reveal}
+            />
           ))}
         </section>
 
@@ -226,6 +264,30 @@ function App(): React.ReactElement {
                 <button type="button" onClick={() => post({ type: 'copy', key: shown.key })}>
                   Copy value
                 </button>
+                {!detail.table ? (
+                  <>
+                    <input
+                      className="rl-detail-search"
+                      type="search"
+                      placeholder="Search in value…"
+                      aria-label="Search in this value"
+                      value={detailQuery}
+                      onChange={(event) => setDetailQuery(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          setDetailQuery('');
+                        }
+                      }}
+                    />
+                    {detailQuery !== '' && found ? (
+                      <span className="meta" role="status">
+                        {found.count === 0
+                          ? 'No matches'
+                          : `${found.count}${found.complete ? '' : '+'} match${found.count === 1 ? '' : 'es'}`}
+                      </span>
+                    ) : null}
+                  </>
+                ) : null}
                 <span className="meta">
                   #{shown.index} · {shown.file}:{shown.line} · {new Date(shown.ts).toLocaleTimeString()}
                 </span>
@@ -243,7 +305,7 @@ function App(): React.ReactElement {
                   <ConsoleTable key={detail.key} table={detail.table} onCopy={copyText} />
                 </div>
               ) : (
-                <pre className="value">{detail.detail}</pre>
+                <DetailValue key={detail.key} detail={detail} blocks={blocks} matcher={detailMatcher ?? matcher} search={found} />
               )}
             </>
           ) : selectedKey !== null && isMissing ? (

@@ -135,7 +135,9 @@ export class RuntimeLensController implements vscode.Disposable {
         captureConsole: this.config.captureConsole,
         captureExpressions: this.config.captureExpressions,
         paused: this.paused,
-        objectDepth: this.config.objectDepth
+        objectDepth: this.config.objectDepth,
+        maxEntries: this.config.maxEntries,
+        maxNodes: this.config.maxNodes
       })
     });
     this.server = server;

@@ -103,6 +103,10 @@ button:hover {
   align-items: center;
 }
 
+.detail-toolbar {
+  flex-wrap: wrap;
+}
+
 .actions button,
 .detail-toolbar button {
   padding: 3px 10px;
@@ -449,4 +453,166 @@ main {
   padding: 16px 8px !important;
   text-align: center !important;
   color: var(--vscode-descriptionForeground) !important;
+}
+
+/* Search matches. Uses the editor's own find-match colours so it follows the active theme. */
+mark.rl-match {
+  color: inherit;
+  background: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
+  outline: 1px solid var(--vscode-editor-findMatchHighlightBorder, transparent);
+  border-radius: 2px;
+}
+
+/* On the selected row the highlight must stay distinct from the selection colour. */
+.event-row.selected mark.rl-match {
+  background: var(--vscode-editor-findMatchBackground, rgba(162, 98, 0, 0.6));
+  outline-color: var(--vscode-editor-findMatchBorder, var(--vscode-focusBorder));
+}
+
+/* Detail pane: ordinary text blocks and expandable value trees. */
+.value-blocks {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.value-blocks > .value + .rl-tree,
+.value-blocks > .rl-tree + .value,
+.value-blocks > .rl-tree + .rl-tree {
+  margin-top: var(--rl-gap);
+}
+
+.rl-tree {
+  color: var(--rl-code);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+  line-height: 1.5;
+}
+
+.rl-tree-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+
+.rl-tree-action {
+  padding: 0 8px;
+  font-family: var(--vscode-font-family);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.rl-tree-tag {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--rl-border);
+  border-radius: 8px;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-font-family);
+  font-size: 10px;
+}
+
+.rl-tree-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rl-tree-children {
+  margin-left: 7px;
+  padding-left: 12px;
+  border-left: 1px solid var(--rl-border);
+}
+
+.rl-tree-gap,
+.rl-tree-toggle {
+  flex: 0 0 14px;
+  width: 14px;
+}
+
+.rl-tree-toggle {
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.rl-tree-toggle:hover,
+.rl-tree-toggle:focus-visible {
+  color: var(--vscode-foreground);
+  background: var(--rl-hover);
+}
+
+.rl-tree-toggle:focus-visible,
+.rl-tree-more:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.rl-tree-key {
+  flex: 0 0 auto;
+  color: var(--vscode-symbolIcon-propertyForeground, var(--vscode-editor-foreground));
+}
+
+.rl-tree-sep,
+.rl-tree-summary,
+.rl-tree-note {
+  color: var(--vscode-descriptionForeground);
+}
+
+.rl-tree-leaf {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rl-t-string {
+  color: var(--vscode-debugTokenExpression-string, var(--vscode-editor-foreground));
+}
+
+.rl-t-number {
+  color: var(--vscode-debugTokenExpression-number, var(--vscode-editor-foreground));
+}
+
+.rl-t-boolean {
+  color: var(--vscode-debugTokenExpression-boolean, var(--vscode-editor-foreground));
+}
+
+.rl-t-null,
+.rl-t-undefined,
+.rl-t-empty {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.rl-tree-note {
+  padding-left: 18px;
+  font-style: italic;
+}
+
+.rl-tree-more {
+  margin: 2px 0 2px 18px;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.rl-detail-search {
+  flex: 1 1 140px;
+  min-width: 110px;
+  max-width: 260px;
+  padding: 2px 6px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+}
+
+.rl-tree-bar .rl-tree-note {
+  padding-left: 0;
 }

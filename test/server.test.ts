@@ -106,7 +106,14 @@ describe('runtime/server (WebSocket + HTTP ingest)', () => {
     server = new RuntimeServer({
       token,
       maxPayloadBytes: 8 * 1024,
-      getAgentConfig: () => ({ captureConsole: true, captureExpressions: false, paused: true, objectDepth: 7 })
+      getAgentConfig: () => ({
+        captureConsole: true,
+        captureExpressions: false,
+        paused: true,
+        objectDepth: 7,
+        maxEntries: 321,
+        maxNodes: 4321
+      })
     });
     const started = await server.start();
     port = started.port;
@@ -309,9 +316,14 @@ describe('runtime/server (WebSocket + HTTP ingest)', () => {
       objectDepth: number;
       captureExpressions: boolean;
       maxPayloadBytes: number;
+      maxEntries: number;
+      maxNodes: number;
     };
     assert.equal(config.t, 'config');
     assert.equal(config.paused, true);
+    // The serialization limits from settings reach the agent on connect.
+    assert.equal(config.maxEntries, 321);
+    assert.equal(config.maxNodes, 4321);
     assert.equal(config.captureExpressions, false);
     assert.equal(config.objectDepth, 7);
     // So the agent can size its own batches against the server's *real*
@@ -329,9 +341,11 @@ describe('runtime/server (WebSocket + HTTP ingest)', () => {
     const message = once<string>((cb) => ws.on('message', (data) => cb(data.toString())), 4000, 'broadcast config');
     server.broadcastConfig();
     const raw = await message;
-    const config = JSON.parse(raw) as { t: string; maxPayloadBytes: number };
+    const config = JSON.parse(raw) as { t: string; maxPayloadBytes: number; maxEntries: number; maxNodes: number };
     assert.equal(config.t, 'config');
     assert.equal(config.maxPayloadBytes, 8 * 1024);
+    assert.equal(config.maxEntries, 321, 'a settings change broadcast reaches running agents');
+    assert.equal(config.maxNodes, 4321);
     ws.close();
   });
 

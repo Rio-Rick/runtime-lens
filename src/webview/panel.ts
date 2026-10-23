@@ -13,6 +13,7 @@ import {
   type SnapshotMessage,
   type WireEvent
 } from './messages';
+import { structuredDetailOf } from './tree-model';
 
 export interface PanelHostActions {
   reveal(file: string, line: number): void;
@@ -247,18 +248,21 @@ export function toWire(stored: StoredEvent): WireEvent {
 }
 
 /**
- * The heavy part of an event (its full text, or its table rows), built only
- * for the one event a person selected instead of for every event on every
- * snapshot.
+ * The heavy part of an event (its full text, its table rows, or the structured
+ * values for the tree view), built only for the one event a person selected
+ * instead of for every event on every snapshot.
  */
 export function toDetail(stored: StoredEvent | undefined): DetailMessage | undefined {
   if (!stored) {
     return undefined;
   }
   const table = stored.event.t === 'log' && stored.event.level === 'table' ? stored.event.table : undefined;
-  return table
-    ? { type: 'detail', key: stored.key, detail: '', table }
-    : { type: 'detail', key: stored.key, detail: detailOf(stored) };
+  if (table) {
+    return { type: 'detail', key: stored.key, detail: '', table };
+  }
+  // `detail` stays the plain-text source of truth. The structured values ride along
+  // only when something in them can be shown as a tree, so ordinary logs are unchanged.
+  return { type: 'detail', key: stored.key, detail: detailOf(stored), ...structuredDetailOf(stored.event) };
 }
 
 function missing(key: number): DetailMissingMessage {

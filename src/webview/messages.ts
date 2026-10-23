@@ -1,4 +1,4 @@
-import type { ConsoleTablePayload } from '../protocol';
+import { validateSerializedValue, type ConsoleTablePayload, type SerializedValue } from '../protocol';
 
 /**
  * The message contract between the extension host (`panel.ts`) and the
@@ -6,8 +6,9 @@ import type { ConsoleTablePayload } from '../protocol';
  * two can't disagree about a payload shape, and both directions validate what
  * they receive instead of trusting it.
  *
- * Type-only imports keep this module free of Node/VS Code dependencies, so it
- * bundles into the Webview and unit-tests under plain Node.
+ * This module may only import from the protocol module, which has no imports of
+ * its own, so it stays free of Node/VS Code dependencies: it bundles into the
+ * Webview and unit-tests under plain Node.
  */
 
 // ------------------------------------------------------------ host -> webview
@@ -64,8 +65,18 @@ export interface SnapshotMessage {
 export interface DetailMessage {
   type: 'detail';
   key: number;
+  /** Plain-text form of the value. Always present, and what the pane shows when `values` is absent. */
   detail: string;
   table?: ConsoleTablePayload;
+  /**
+   * The event's structured values (log arguments, or the probed value), sent
+   * only when at least one of them can be shown as an expandable tree. Ordinary
+   * logs omit it, so their message is unchanged. A Webview that ignores or
+   * rejects it falls back to `detail`.
+   */
+  values?: SerializedValue[];
+  /** Source text of the probed expression; only sent together with `values`. */
+  expr?: string;
 }
 
 /** The requested event is no longer in the host's history. */
@@ -97,6 +108,35 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const isInt = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value);
 const isString = (value: unknown): value is string => typeof value === 'string';
+
+/** Same ceiling the protocol puts on the arguments of one console call. */
+const MAX_DETAIL_VALUES = 64;
+const MAX_EXPR_LENGTH = 4_096;
+
+/**
+ * Keep the structured fields of a `detail` message only if they are sound.
+ * Invalid ones are dropped rather than failing the whole message, because the
+ * plain-text `detail` next to them is still perfectly usable.
+ */
+function sanitizeDetail(raw: Record<string, unknown>): DetailMessage {
+  if (raw.values === undefined && raw.expr === undefined) {
+    return raw as unknown as DetailMessage;
+  }
+  const { values, expr, ...rest } = raw;
+  const message = { ...rest } as unknown as DetailMessage;
+  if (
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.length <= MAX_DETAIL_VALUES &&
+    values.every((value) => validateSerializedValue(value))
+  ) {
+    message.values = values as SerializedValue[];
+    if (isString(expr) && expr.length <= MAX_EXPR_LENGTH) {
+      message.expr = expr;
+    }
+  }
+  return message;
+}
 
 function isWireEvent(value: unknown): value is WireEvent {
   return (
@@ -147,7 +187,7 @@ export function parseHostMessage(raw: unknown): HostMessage | undefined {
         isString(raw.detail) &&
         (raw.table === undefined ||
           (isRecord(raw.table) && Array.isArray(raw.table.columns) && Array.isArray(raw.table.rows)))
-        ? (raw as unknown as DetailMessage)
+        ? sanitizeDetail(raw)
         : undefined;
     case 'detail-missing':
       return isInt(raw.key) ? { type: 'detail-missing', key: raw.key } : undefined;

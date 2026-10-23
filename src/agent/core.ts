@@ -10,8 +10,8 @@
  *  3. Never crash the host. Every callback is wrapped; a failure disables the
  *     agent instead of taking the app down.
  */
-import { PROTOCOL_VERSION, parseServerMessage, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
-import { serialize } from '../serialization/serializer';
+import { MAX_SERIALIZED_ENTRIES, PROTOCOL_VERSION, parseServerMessage, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
+import { DEFAULT_SERIALIZE_OPTIONS, serialize } from '../serialization/serializer';
 import { utf8ByteLength } from '../utils/bytes';
 import { isTableSource, normalizeConsoleTable } from './console-table';
 
@@ -58,6 +58,10 @@ export interface AgentConfig {
   maxBatchBytes: number;
   objectDepth: number;
   maxStringLength: number;
+  /** Entries kept per array/object/Map/Set (`runtimeLens.maxEntries`, pushed live). */
+  maxEntries: number;
+  /** Values serialized per captured value (`runtimeLens.maxNodes`, pushed live). */
+  maxNodes: number;
   captureConsole: boolean;
   captureExpressions: boolean;
 }
@@ -72,6 +76,8 @@ export const DEFAULT_AGENT_CONFIG: Omit<AgentConfig, 'sessionId' | 'token' | 'la
   maxBatchBytes: 196 * 1024,
   objectDepth: 3,
   maxStringLength: 4000,
+  maxEntries: DEFAULT_SERIALIZE_OPTIONS.maxEntries,
+  maxNodes: DEFAULT_SERIALIZE_OPTIONS.maxNodes,
   captureConsole: true,
   captureExpressions: true
 };
@@ -166,6 +172,8 @@ export class Agent {
     paused: boolean;
     objectDepth: number;
     maxPayloadBytes?: number;
+    maxEntries?: number;
+    maxNodes?: number;
   }): void {
     this.config.captureConsole = cfg.captureConsole;
     this.config.captureExpressions = cfg.captureExpressions;
@@ -176,6 +184,20 @@ export class Agent {
       // for approxEventBytes's necessarily approximate per-event accounting.
       this.config.maxBatchBytes = Math.max(1024, Math.floor(cfg.maxPayloadBytes * 0.75));
     }
+    // Same rule as above: a missing or nonsensical value keeps the current limit. maxEntries is
+    // clamped to what the protocol validator accepts, so a large setting can't get a batch rejected.
+    if (typeof cfg.maxEntries === 'number' && Number.isFinite(cfg.maxEntries) && cfg.maxEntries >= 1) {
+      this.config.maxEntries = Math.min(Math.floor(cfg.maxEntries), MAX_SERIALIZED_ENTRIES);
+    }
+    if (typeof cfg.maxNodes === 'number' && Number.isFinite(cfg.maxNodes) && cfg.maxNodes >= 1) {
+      this.config.maxNodes = Math.floor(cfg.maxNodes);
+    }
+  }
+
+  /** Limits for serializing one captured value, from the live config. */
+  private serializeOptions(): { depth: number; maxStringLength: number; maxEntries: number; maxNodes: number } {
+    const { objectDepth, maxStringLength, maxEntries, maxNodes } = this.config;
+    return { depth: objectDepth, maxStringLength, maxEntries, maxNodes };
   }
 
   private startTimer(): void {
@@ -199,7 +221,7 @@ export class Agent {
     try {
       if (!this.disabled && !this.paused && this.config.captureConsole) {
         const count = this.bump(id);
-        const serializeOptions = { depth: this.config.objectDepth, maxStringLength: this.config.maxStringLength };
+        const serializeOptions = this.serializeOptions();
         const serializedArgs = args.map((a, index) =>
           serialize(a, level === 'table' && index === 0 ? { ...serializeOptions, ...TABLE_ARG_SERIALIZE } : serializeOptions)
         );
@@ -244,10 +266,7 @@ export class Agent {
           count,
           expr,
           loc: { file, line, column },
-          value: serialize(value, {
-            depth: this.config.objectDepth,
-            maxStringLength: this.config.maxStringLength
-          })
+          value: serialize(value, this.serializeOptions())
         });
       }
     } catch {

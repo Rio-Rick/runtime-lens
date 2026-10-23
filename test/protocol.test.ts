@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   ABSOLUTE_MAX_PAYLOAD_BYTES,
   MAX_EVENTS_PER_BATCH,
+  MAX_SERIALIZED_ENTRIES,
   PROTOCOL_MAJOR,
   PROTOCOL_VERSION,
   isCompatibleVersion,
@@ -394,6 +395,45 @@ describe('protocol: server -> agent messages', () => {
       });
       assert.equal(!res.ok && res.code, 'bad-message', `expected ${JSON.stringify(bad)} to be rejected`);
     }
+  });
+
+  it('accepts optional maxEntries/maxNodes on a config push, floors them, and omits them when absent', () => {
+    const base = { t: 'config', v: V, captureConsole: true, captureExpressions: true, paused: false, objectDepth: 3 };
+    const withLimits = validateServerMessage({ ...base, maxEntries: 500.9, maxNodes: 20_000 });
+    assert.equal(withLimits.ok && withLimits.value.t === 'config' && withLimits.value.maxEntries, 500);
+    assert.equal(withLimits.ok && withLimits.value.t === 'config' && withLimits.value.maxNodes, 20_000);
+    const without = validateServerMessage(base);
+    assert.equal(
+      without.ok && without.value.t === 'config' && ('maxEntries' in without.value || 'maxNodes' in without.value),
+      false,
+      'absent fields stay absent so an older host/agent pairing keeps its defaults'
+    );
+  });
+
+  it('rejects a non-positive or non-numeric maxEntries/maxNodes on a config push', () => {
+    for (const field of ['maxEntries', 'maxNodes']) {
+      for (const bad of [0, 0.5, -1, Number.NaN, Number.POSITIVE_INFINITY, '100', null]) {
+        const res = validateServerMessage({
+          t: 'config',
+          v: V,
+          captureConsole: true,
+          captureExpressions: true,
+          paused: false,
+          objectDepth: 3,
+          [field]: bad
+        });
+        assert.equal(!res.ok && res.code, 'bad-message', `${field}=${JSON.stringify(bad)} should be rejected`);
+      }
+    }
+  });
+
+  it('the validator accepts exactly MAX_SERIALIZED_ENTRIES entries per container, and no more', () => {
+    const entries = (n: number) => Array.from({ length: n }, () => ({ k: 'number', v: 1 }));
+    assert.equal(validateSerializedValue({ k: 'array', entries: entries(MAX_SERIALIZED_ENTRIES), length: MAX_SERIALIZED_ENTRIES }), true);
+    assert.equal(
+      validateSerializedValue({ k: 'array', entries: entries(MAX_SERIALIZED_ENTRIES + 1), length: MAX_SERIALIZED_ENTRIES + 1 }),
+      false
+    );
   });
 
   it('parseServerMessage parses JSON and rejects garbage', () => {

@@ -47,7 +47,14 @@ export interface RuntimeServerOptions {
   /** Injected for tests; a fresh 256-bit token is generated per start otherwise. */
   token?: string;
   /** Live capture switches pushed to agents on connect. */
-  getAgentConfig?: () => { captureConsole: boolean; captureExpressions: boolean; paused: boolean; objectDepth: number };
+  getAgentConfig?: () => {
+    captureConsole: boolean;
+    captureExpressions: boolean;
+    paused: boolean;
+    objectDepth: number;
+    maxEntries?: number;
+    maxNodes?: number;
+  };
 }
 
 const DEFAULT_MAX_PAYLOAD = 256 * 1024;

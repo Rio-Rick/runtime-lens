@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { MAX_SERIALIZED_ENTRIES } from '../protocol';
 
 export interface RuntimeLensConfig {
   enabled: boolean;
@@ -7,6 +8,8 @@ export interface RuntimeLensConfig {
   captureExpressions: boolean;
   maxInlineLength: number;
   objectDepth: number;
+  maxEntries: number;
+  maxNodes: number;
   maxHistory: number;
   showTimestamp: boolean;
   showExecutionCount: boolean;
@@ -28,6 +31,8 @@ export function readConfig(scope?: vscode.ConfigurationScope): RuntimeLensConfig
     captureExpressions: c.get<boolean>('captureExpressions', true),
     maxInlineLength: clamp(c.get<number>('maxInlineLength', 120), 10, 2000),
     objectDepth: clamp(c.get<number>('objectDepth', 3), 0, 10),
+    maxEntries: Math.floor(clamp(c.get<number>('maxEntries', 100), 1, MAX_SERIALIZED_ENTRIES)),
+    maxNodes: Math.floor(clamp(c.get<number>('maxNodes', 5000), 100, 100_000)),
     maxHistory: clamp(c.get<number>('maxHistory', 5000), 50, 100_000),
     showTimestamp: c.get<boolean>('showTimestamp', false),
     showExecutionCount: c.get<boolean>('showExecutionCount', true),

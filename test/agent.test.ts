@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { Agent, DEFAULT_AGENT_CONFIG, createNoopAgent, type AgentTransport } from '../src/agent/core';
 import { PROTOCOL_VERSION, type BatchMessage, type ClientMessage, type LogEvent, type ExprEvent } from '../src/protocol';
-import { validateClientMessage } from '../src/protocol';
+import { MAX_SERIALIZED_ENTRIES, validateClientMessage } from '../src/protocol';
 
 class FakeTransport implements AgentTransport {
   readonly sent: ClientMessage[] = [];
@@ -477,6 +477,113 @@ describe('agent/core (console interception)', () => {
       agent.dispose();
     });
     assert.doesNotMatch(JSON.stringify((transport.events() as LogEvent[])[0].args[0]), /maxdepth/);
+  });
+
+  describe('maxEntries / maxNodes (runtimeLens.maxEntries, runtimeLens.maxNodes)', () => {
+    type Captured = { entries: unknown[]; length: number };
+    const config = (extra: { maxEntries?: number; maxNodes?: number }) => ({
+      captureConsole: true,
+      captureExpressions: true,
+      paused: false,
+      objectDepth: 3,
+      ...extra
+    });
+    function capture(apply: ((agent: Agent) => void) | undefined, size: number): Captured {
+      const transport = new FakeTransport();
+      withCapturedConsole(() => {
+        const agent = makeAgent(transport);
+        apply?.(agent);
+        agent.c('log', 'p', '/a.ts', 1, 0, [Array.from({ length: size }, (_, i) => i)]);
+        agent.flush();
+        agent.dispose();
+      });
+      return (transport.events() as LogEvent[])[0].args[0] as unknown as Captured;
+    }
+
+    it('keeps today\'s limits until a config says otherwise', () => {
+      assert.equal(DEFAULT_AGENT_CONFIG.maxEntries, 100);
+      assert.equal(DEFAULT_AGENT_CONFIG.maxNodes, 5000);
+      const out = capture(undefined, 150);
+      assert.equal(out.entries.length, 100);
+      assert.equal(out.length, 150, 'the true length is still reported');
+    });
+
+    it('applyConfig raises maxEntries for values captured afterwards', () => {
+      const out = capture((a) => a.applyConfig(config({ maxEntries: 400 })), 250);
+      assert.equal(out.entries.length, 250);
+    });
+
+    it('applyConfig can also lower maxEntries', () => {
+      assert.equal(capture((a) => a.applyConfig(config({ maxEntries: 10 })), 250).entries.length, 10);
+    });
+
+    it('applyConfig raises maxNodes, which otherwise ends serialization early', () => {
+      const wide = (): unknown[] => Array.from({ length: 50 }, () => Array.from({ length: 50 }, (_, i) => i));
+      const run = (extra: { maxEntries?: number; maxNodes?: number }): string => {
+        const transport = new FakeTransport();
+        withCapturedConsole(() => {
+          const agent = makeAgent(transport);
+          agent.applyConfig(config(extra));
+          agent.c('log', 'p', '/a.ts', 1, 0, [wide()]);
+          agent.flush();
+          agent.dispose();
+        });
+        return JSON.stringify((transport.events() as LogEvent[])[0].args[0]);
+      };
+      assert.match(run({ maxNodes: 200 }), /budget/, 'a small node budget ends capture early');
+      assert.doesNotMatch(run({ maxNodes: 10_000 }), /budget/, 'a larger budget captures all 50x50 values');
+    });
+
+    it('clamps maxEntries to what the protocol validator accepts, so a batch is never rejected', () => {
+      const out = capture((a) => a.applyConfig(config({ maxEntries: 50_000 })), 3000);
+      assert.equal(out.entries.length, MAX_SERIALIZED_ENTRIES);
+      const transport = new FakeTransport();
+      withCapturedConsole(() => {
+        const agent = makeAgent(transport);
+        agent.applyConfig(config({ maxEntries: 50_000 }));
+        agent.c('log', 'p', '/a.ts', 1, 0, [Array.from({ length: 3000 }, (_, i) => i)]);
+        agent.flush();
+        agent.dispose();
+      });
+      const batch = transport.sent.find((m) => m.t === 'batch');
+      assert.ok(batch);
+      assert.equal(validateClientMessage(batch).ok, true);
+    });
+
+    it('ignores missing or nonsensical values instead of zeroing a limit', () => {
+      for (const bad of [undefined, 0, -3, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        const kept = capture((a) => {
+          a.applyConfig(config({ maxEntries: 300 }));
+          a.applyConfig(config({ maxEntries: bad, maxNodes: bad }));
+        }, 250);
+        assert.equal(kept.entries.length, 250, `maxEntries=${String(bad)} must keep the previous limit`);
+      }
+    });
+
+    it('is applied from a config push delivered through transport.onMessage', () => {
+      const transport = new FakeTransport();
+      withCapturedConsole(() => {
+        const agent = makeAgent(transport);
+        transport.receive({ t: 'config', v: PROTOCOL_VERSION, ...config({ maxEntries: 300, maxNodes: 9000 }) });
+        agent.c('log', 'p', '/a.ts', 1, 0, [Array.from({ length: 250 }, (_, i) => i)]);
+        agent.flush();
+        agent.dispose();
+      });
+      assert.equal(((transport.events() as LogEvent[])[0].args[0] as unknown as Captured).entries.length, 250);
+    });
+
+    it('applies to probed expressions too', () => {
+      const transport = new FakeTransport();
+      withCapturedConsole(() => {
+        const agent = makeAgent(transport);
+        agent.applyConfig(config({ maxEntries: 300 }));
+        agent.e('p', '/a.ts', 1, 0, 'list', Array.from({ length: 250 }, (_, i) => i));
+        agent.flush();
+        agent.dispose();
+      });
+      const expr = (transport.events() as ExprEvent[]).find((e) => e.t === 'expr');
+      assert.equal(((expr?.value as unknown) as Captured).entries.length, 250);
+    });
   });
 
   it('ignores malformed or stale-version pushes instead of throwing', () => {
