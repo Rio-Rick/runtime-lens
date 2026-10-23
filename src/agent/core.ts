@@ -14,6 +14,7 @@ import { MAX_SERIALIZED_ENTRIES, PROTOCOL_VERSION, parseServerMessage, type Batc
 import { DEFAULT_SERIALIZE_OPTIONS, serialize } from '../serialization/serializer';
 import { utf8ByteLength } from '../utils/bytes';
 import { isTableSource, normalizeConsoleTable } from './console-table';
+import { shrinkEvent } from './shrink';
 
 export interface AgentTransport {
   /** Send one already-serialized JSON string. Must not throw. */
@@ -379,18 +380,23 @@ export class Agent {
   /**
    * Pull the next outgoing batch off the front of the buffer, bounded by
    * both `maxBatchEvents` and `maxBatchBytes`. A single event that alone
-   * exceeds the byte budget is still sent by itself — there's nothing
-   * smaller to split it into, and `flush()` must always make progress
-   * rather than getting stuck retrying the same oversized head-of-buffer
-   * event forever.
+   * exceeds the byte budget can't be split across batches, and sending it
+   * as is would make the server drop the whole connection (a message over
+   * its `maxPayload` is fatal, not just rejected). So it is shrunk to fit
+   * (`shrinkEvent`: fewer entries, shorter text, marked as cut) and then sent
+   * by itself, which also keeps `flush()` making progress.
    */
   private takeNextBatch(): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
     let bytes = 2; // '[' + ']'
     while (events.length < this.config.maxBatchEvents && this.buffer.length > 0) {
-      const size = approxEventBytes(this.buffer[0]);
+      let size = approxEventBytes(this.buffer[0]);
       if (events.length > 0 && bytes + size > this.config.maxBatchBytes) {
         break;
+      }
+      if (events.length === 0 && size > this.config.maxBatchBytes) {
+        this.buffer[0] = shrinkEvent(this.buffer[0], this.config.maxBatchBytes - 2);
+        size = approxEventBytes(this.buffer[0]);
       }
       events.push(this.buffer.shift() as RuntimeEvent);
       bytes += size;
