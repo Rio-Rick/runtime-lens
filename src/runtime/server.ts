@@ -445,7 +445,16 @@ export class RuntimeServer {
         this.emitter.emit('session-close', { sessionId, reason: 'socket-closed' });
       }
     });
-    ws.on('error', (error) => this.emitter.emit('error', { error }));
+    ws.on('error', (error) => {
+      // `ws` closes the socket when one message exceeds `maxPayload`; its bare
+      // "Max payload size exceeded" gives no hint what to change.
+      const tooLarge = (error as { code?: unknown }).code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH';
+      this.emitter.emit('error', {
+        error: tooLarge
+          ? new Error(`${error.message}: a message was larger than runtimeLens.maxPayloadBytes (${this.maxPayloadBytes} bytes). Raise that setting or lower runtimeLens.maxEntries / runtimeLens.maxNodes.`)
+          : error
+      });
+    });
   }
 
   private rejectSocketMessage(ws: WebSocket, message: string): void {

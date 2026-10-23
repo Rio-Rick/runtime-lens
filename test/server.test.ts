@@ -332,6 +332,20 @@ describe('runtime/server (WebSocket + HTTP ingest)', () => {
     ws.close();
   });
 
+  it('names the setting to change when a single message exceeds maxPayloadBytes', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
+    await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');
+    ws.send(JSON.stringify({ t: 'hello', v: V, token, sessionId: 's-big', runtime: 'node', label: 'big' }));
+    await once<string>((cb) => ws.on('message', (data) => cb(data.toString())), 4000, "hello's config ack");
+    const failure = once<Error>((cb) => server.emitter.on('error', ({ error }) => cb(error)), 4000, 'server error');
+    ws.send('x'.repeat(64 * 1024)); // far over the 8 KiB limit configured in beforeEach
+    const error = await failure;
+    assert.match(error.message, /Max payload size exceeded/, 'the original cause is kept');
+    assert.match(error.message, /runtimeLens\.maxPayloadBytes \(8192 bytes\)/);
+    assert.match(error.message, /runtimeLens\.maxEntries/);
+    ws.terminate();
+  });
+
   it('broadcastConfig also carries the current maxPayloadBytes to every connected agent', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/rl?token=${token}`);
     await once<void>((cb) => ws.on('open', () => cb()), 4000, 'ws open');

@@ -222,7 +222,7 @@
           "type": "number",
           "default": 262144,
           "minimum": 4096,
-          "description": "Maximum accepted size, in bytes, of a single batch message from an instrumented process."
+          "description": "Maximum accepted size, in bytes, of a single batch message from an instrumented process. A single event larger than this is shortened (fewer entries, shorter text) before it is sent. Raise it if you raise runtimeLens.maxEntries / runtimeLens.maxNodes and see truncated values."
         }
       }
     },

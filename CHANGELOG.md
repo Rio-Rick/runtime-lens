@@ -12,6 +12,11 @@ All notable changes to Runtime Lens are documented in this file. The format foll
   event list (text and file) and in the detail pane, case-insensitively and as literal text (never a
   pattern). Highlights follow the filter the host applied, so they always describe the list shown;
   emptying the box clears them and restores the full list immediately instead of after the debounce.
+- **A single huge event can no longer take the session down.** An event bigger than the batch budget
+  used to be sent as is, and the server closed the connection with "Max payload size exceeded" (0 events
+  received afterwards). The agent now shortens such an event (fewer entries, shorter text, marked as cut,
+  true sizes still shown) so it fits, and the error message names `runtimeLens.maxPayloadBytes` and
+  `runtimeLens.maxEntries` / `runtimeLens.maxNodes` as the settings to adjust.
 - **`runtimeLens.maxEntries` and `runtimeLens.maxNodes` settings.** Control how much of a large
   object or array is captured (defaults unchanged: 100 entries per container, 5000 values per
   captured value). Pushed live to connected agents, so they apply to values logged after the change

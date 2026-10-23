@@ -586,6 +586,57 @@ describe('agent/core (console interception)', () => {
     });
   });
 
+  describe('a single event larger than the batch budget', () => {
+    const budget = 20_000;
+    const config = (extra: { maxEntries: number; maxNodes: number }) => ({
+      captureConsole: true,
+      captureExpressions: true,
+      paused: false,
+      objectDepth: 3,
+      maxPayloadBytes: budget,
+      ...extra
+    });
+
+    it('is shrunk to fit instead of being sent over the server limit (which would drop the connection)', () => {
+      const transport = new FakeTransport();
+      withCapturedConsole(() => {
+        const agent = makeAgent(transport);
+        agent.applyConfig(config({ maxEntries: 1000, maxNodes: 50_000 }));
+        const huge = Array.from({ length: 1000 }, (_, i) => ({ id: i, text: 'x'.repeat(300) }));
+        agent.c('log', 'p', '/a.ts', 1, 0, [huge]);
+        agent.c('log', 'p', '/a.ts', 2, 0, ['after the big one']);
+        agent.flush();
+        agent.dispose();
+      });
+      const batches = transport.sent.filter((m): m is BatchMessage => m.t === 'batch');
+      assert.ok(batches.length >= 1);
+      for (const batch of batches) {
+        const size = Buffer.byteLength(JSON.stringify(batch));
+        assert.ok(size <= budget, `a batch was ${size} bytes, over the ${budget}-byte server limit`);
+        assert.equal(validateClientMessage(batch).ok, true);
+      }
+      const logs = transport.events() as LogEvent[];
+      assert.equal(logs.length, 2, 'both events arrive: nothing after the big one is lost');
+      const arg = logs[0].args[0] as unknown as { length: number; entries: unknown[]; truncated?: boolean };
+      assert.equal(arg.length, 1000, 'the true size is still reported');
+      assert.ok(arg.entries.length < 1000 && arg.truncated === true);
+    });
+
+    it('leaves events that fit exactly as captured', () => {
+      const transport = new FakeTransport();
+      withCapturedConsole(() => {
+        const agent = makeAgent(transport);
+        agent.applyConfig(config({ maxEntries: 1000, maxNodes: 50_000 }));
+        agent.c('log', 'p', '/a.ts', 1, 0, [Array.from({ length: 30 }, (_, i) => i)]);
+        agent.flush();
+        agent.dispose();
+      });
+      const arg = (transport.events() as LogEvent[])[0].args[0] as unknown as { entries: unknown[]; truncated?: boolean };
+      assert.equal(arg.entries.length, 30);
+      assert.equal(arg.truncated, undefined);
+    });
+  });
+
   it('ignores malformed or stale-version pushes instead of throwing', () => {
     const transport = new FakeTransport();
     const agent = makeAgent(transport, { objectDepth: 3 });
