@@ -149,7 +149,7 @@ function walk(
     const err = obj as Error & Record<string, unknown>;
     const props: Record<string, SerializedValue> = {};
     seen.set(obj, path);
-    for (const key of ownKeys(err)) {
+    for (const key of ownKeys(err) ?? []) {
       if (key === 'stack' || key === 'message' || key === 'name') {
         continue;
       }
@@ -228,14 +228,23 @@ function walk(
       return { k: 'unserializable', hint: 'Promise (pending state not observable synchronously)' };
     }
 
-    const keys = ownKeys(obj);
+    const ctor = constructorName(obj);
+    let keys = ownKeys(obj);
+    if (keys === null) {
+      // Object.keys threw (hostile Proxy, revoked Proxy...). Say so instead of rendering a fake `{}`.
+      return { k: 'unserializable', hint: `${ctor ?? tag} (properties not readable)` };
+    }
+    if (keys.length === 0) {
+      // Own keys are empty. Class-like objects (DOM events, some library wrappers) can keep their
+      // data as enumerable *inherited* properties; show those rather than a misleading `{}`.
+      keys = inheritedDataKeys(obj);
+    }
     const limit = Math.min(keys.length, opts.maxEntries);
     const entries: Array<[string, SerializedValue]> = [];
     for (let i = 0; i < limit; i++) {
       const key = keys[i];
       entries.push([key, walk(readProp(obj, key), opts, seen, state, depth + 1, `${path}.${key}`)]);
     }
-    const ctor = constructorName(obj);
     return {
       k: 'object',
       ctor: ctor && ctor !== 'Object' ? ctor : undefined,
@@ -256,12 +265,44 @@ function safeArity(fn: Function): number {
   }
 }
 
-function ownKeys(obj: object): string[] {
+function ownKeys(obj: object): string[] | null {
   try {
     return Object.keys(obj);
   } catch {
-    return [];
+    return null;
   }
+}
+
+/**
+ * Fallback for an object whose `Object.keys` is empty. Libraries (antd / rc-*, etc.) wrap React's
+ * event with `Object.create(event, { target: { value } })`: the wrapper owns only NON-enumerable
+ * `target` / `currentTarget`, and everything else is inherited from the real event. Collect both:
+ * own non-enumerable names first, then enumerable inherited ones (`for...in`). Functions are skipped.
+ */
+function inheritedDataKeys(obj: object): string[] {
+  const out: string[] = [];
+  const seenKeys = new Set<string>();
+  const add = (key: string): void => {
+    if (!seenKeys.has(key) && out.length < 1_000 && typeof readProp(obj, key) !== 'function') {
+      seenKeys.add(key);
+      out.push(key);
+    }
+  };
+  try {
+    for (const key of Object.getOwnPropertyNames(obj)) {
+      add(key);
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    for (const key in obj) {
+      add(key);
+    }
+  } catch {
+    /* keep whatever was collected */
+  }
+  return out;
 }
 
 function readProp(obj: object, key: string): unknown {
