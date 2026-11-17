@@ -52,6 +52,53 @@ All notable changes to Runtime Lens are documented in this file. The format foll
   `history of file.ts:12`. Empty *Search / Filter Events* and *Clear* also leave the scope.
 - Diagnostics now report inline repaint timing (last / slowest ms).
 
+### Fixed
+
+- **A busy reconnect loop in the agent.** When the editor was gone (closed, or a token that no longer
+  matched), every failed WebSocket attempt immediately started the next one, hundreds of thousands per
+  second inside the user's process. Attempts that never open now back off (250 ms doubling to 10 s); a
+  connection that dropped after being open is still retried at once. Late events of a socket the agent
+  had already replaced no longer tear down its replacement.
+- **One oversize value no longer discards a whole batch.** The agent could send values the server's
+  validator refuses (error messages over 16 384 characters, object keys over 4 096, `console.log(...)`
+  with more than 64 arguments, huge BigInts, runtime errors from a file path longer than ~120
+  characters, and browser errors from cross-origin scripts with `filename: ''` / `lineno: 0`), and the
+  server rejects the entire batch for one such event. The limits are now shared constants used by both
+  sides, and the agent clips to them (marking omitted arguments).
+- **The Node agent no longer changes how the app crashes.** Its `unhandledRejection` listener made Node
+  stop crashing on (and printing) unhandled rejections, and re-throwing from its `uncaughtException`
+  listener changed the exit code from 1 to 7. Crashes are now observed with `uncaughtExceptionMonitor`,
+  and an unhandled rejection still crashes as it would without Runtime Lens (unless the app has its own
+  handler or an `--unhandled-rejections` mode).
+- **`// ?` probes no longer spread to the next statement.** Babel also attaches a trailing comment as the
+  *leading* comment of the next statement, so `foo();` after a probed line (or a `return` after a probed
+  declaration) became a probe too. Only a comment on the statement's last line counts, and
+  `export const x = …; // ?` now works.
+- **Projects inside a folder called `build`, `dist`, `out`, … were never instrumented.** Excluded folder
+  names were matched against the whole absolute path, including the folders above the project. They are
+  now matched below the project root (Vite `root`, webpack `rootContext`, else the working directory).
+- **A plain object such as `{ name: 'ValidationError', … }` was shown as an empty error.**
+- **A fractional setting (`"runtimeLens.maxHistory": 5000.5`) made the extension fail to activate.**
+  Integer settings are now rounded down, declared `integer` in the manifest, and `port` /
+  `maxPayloadBytes` have their bounds.
+- **`GET //` (before authentication) threw an uncaught exception in the extension host**, as did a
+  rejected upgrade whose client reset the connection. Both are handled.
+- **Changing `runtimeLens.maxPayloadBytes` silently did nothing.** It now offers a restart.
+- **Show Diagnostics no longer prints the session token** (run command, snippet and recent log).
+- The Webview's CSP nonce comes from the CSPRNG instead of `Math.random`.
+- Changing any setting no longer rebuilds every index of the event history when the history size did not
+  change.
+
+### Improved
+
+- Webview: secondary text on the selected row stays readable on light themes; narrow panels stack the
+  list above the detail pane; keyboard focus and `:disabled` states are styled; the selected row and the
+  Pause / Follow toggles expose `aria-current` / `aria-pressed`; the last ticked level can't be unticked
+  (an empty selection used to show everything).
+- Commands that need a tree node (`Reveal Event Source`, `Copy Event Value`, `Copy Event as JSON`,
+  `Disconnect Session`) are hidden from the Command Palette, where they did nothing.
+- `npm run package` no longer hard-codes the version in the file name.
+
 ### Changed
 
 - Inline decorations are only built for lines in (or within 100 lines of) the viewport and are
