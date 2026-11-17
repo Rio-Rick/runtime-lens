@@ -113,6 +113,16 @@ export class RuntimeLensController implements vscode.Disposable {
       await this.start();
     } else if (previous.port !== this.config.port && this.server?.isRunning) {
       await this.restart();
+    } else if (previous.maxPayloadBytes !== this.config.maxPayloadBytes && this.server?.isRunning) {
+      // The limit is baked into the running server's sockets, so it can't be applied live like
+      // maxEntries / maxNodes. A restart also issues a new token, which running processes don't
+      // have, so offer it instead of doing it behind the user's back.
+      void vscode.window
+        .showInformationMessage(
+          'Runtime Lens: runtimeLens.maxPayloadBytes applies after the server restarts. Processes already running must be restarted too (they get a new token).',
+          'Restart Runtime Lens'
+        )
+        .then((choice) => (choice ? this.restart() : undefined));
     }
     logger.debug(`configuration reloaded: ${JSON.stringify(this.config)}`);
   }
@@ -544,7 +554,17 @@ export class RuntimeLensController implements vscode.Disposable {
     lines.push('Recent log');
     lines.push('----------');
     lines.push(...logger.recent(80));
-    return lines.join('\n');
+    return this.redactToken(lines.join('\n'));
+  }
+
+  /**
+   * The report is meant to be pasted into bug reports, and the run command,
+   * config snippet and log lines in it carry the session token, which
+   * authenticates anything on this machine to the runtime server.
+   */
+  private redactToken(text: string): string {
+    const token = this.server?.token;
+    return token ? text.split(token).join('<redacted>') : text;
   }
 
   async showDiagnostics(): Promise<void> {

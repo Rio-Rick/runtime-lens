@@ -330,8 +330,8 @@ export class RuntimeServer {
   // ---------------------------------------------------------------- upgrade
 
   private handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
-    const url = new URL(req.url ?? '/', `http://127.0.0.1:${this.portValue}`);
-    if (url.pathname !== '/rl') {
+    const url = this.parseRequestUrl(req);
+    if (!url || url.pathname !== '/rl') {
       this.rejectUpgrade(socket, 404, 'unknown endpoint');
       return;
     }
@@ -351,7 +351,24 @@ export class RuntimeServer {
     this.wss?.handleUpgrade(req, socket, head, (ws) => this.attachSocket(ws, this.tokenValue));
   }
 
+  /**
+   * Parse the request target without ever throwing. `new URL('//', base)` is
+   * an "Invalid URL" error, and this runs before authentication, so an
+   * unparsable target must be a 404, not an uncaught exception in the
+   * extension host.
+   */
+  private parseRequestUrl(req: http.IncomingMessage): URL | undefined {
+    try {
+      return new URL(req.url ?? '/', `http://127.0.0.1:${this.portValue}`);
+    } catch {
+      return undefined;
+    }
+  }
+
   private rejectUpgrade(socket: Duplex, status: number, reason: string): void {
+    // Node removes its own error listener from an upgrading socket; without one a
+    // client that resets the connection right after the rejection throws.
+    socket.on('error', () => undefined);
     try {
       socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
     } finally {
@@ -479,7 +496,12 @@ export class RuntimeServer {
   // ------------------------------------------------------------------- http
 
   private handleHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
-    const url = new URL(req.url ?? '/', `http://127.0.0.1:${this.portValue}`);
+    const url = this.parseRequestUrl(req);
+    if (!url) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
 
     if (req.method === 'GET' && url.pathname === '/health') {
       const body = JSON.stringify({ ok: true, v: PROTOCOL_VERSION, ...this.stats() });

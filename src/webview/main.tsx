@@ -36,6 +36,7 @@ const EventRow = memo(function EventRow({ event, selected, matcher, onSelect, on
     <button
       className={`event-row ${selected ? 'selected' : ''}`}
       type="button"
+      aria-current={selected ? 'true' : undefined}
       onClick={() => onSelect(event.key)}
       onDoubleClick={() => onReveal(event.key)}
     >
@@ -180,12 +181,15 @@ function App(): React.ReactElement {
           }}
         />
 
-        <div className="levels" aria-label="Console levels">
+        <div className="levels" role="group" aria-label="Console levels">
           {LEVELS.map((level) => (
             <label key={level}>
               <input
                 type="checkbox"
                 checked={levels.includes(level)}
+                // Unticking every level would send "no level filter", which shows everything: the
+                // opposite of what an empty selection suggests. Keep at least one ticked.
+                disabled={levels.length === 1 && levels[0] === level}
                 onChange={(event) => {
                   const next = event.target.checked ? LEVELS.filter((l) => l === level || levels.includes(l)) : levels.filter((l) => l !== level);
                   setLevels(next);
@@ -202,6 +206,7 @@ function App(): React.ReactElement {
           <button
             type="button"
             className={state.paused ? 'on' : ''}
+            aria-pressed={state.paused}
             onClick={() => {
               dispatch({ type: 'set-paused', value: !state.paused });
               post({ type: 'pause', paused: !state.paused });
@@ -212,6 +217,7 @@ function App(): React.ReactElement {
           <button
             type="button"
             className={state.follow ? 'on' : ''}
+            aria-pressed={state.follow}
             title="Keep the newest entry selected"
             onClick={() => {
               dispatch({ type: 'set-follow', value: !state.follow });

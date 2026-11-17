@@ -5,6 +5,8 @@ import { requiresJsxCapableRuntime, shouldInstrument, toModuleSpecifier } from '
 
 interface MinimalLoaderContext {
   resourcePath: string;
+  /** The project root webpack / Next.js was started in. */
+  rootContext?: string;
   target?: string;
   cacheable?: (flag: boolean) => void;
   callback: (err: Error | null, code?: string, map?: unknown) => void;
@@ -115,7 +117,7 @@ function runtimeLensLoader(this: MinimalLoaderContext, source: string, inputMap?
   const host = String(options.host ?? process.env.RUNTIME_LENS_HOST ?? '127.0.0.1');
   const depth = Number.parseInt(String(options.objectDepth ?? process.env.RUNTIME_LENS_DEPTH ?? '3'), 10) || 3;
 
-  if (!Number.isInteger(port) || port <= 0 || token.length === 0 || !shouldInstrument(file)) {
+  if (!Number.isInteger(port) || port <= 0 || token.length === 0 || !shouldInstrument(file, { root: this.rootContext })) {
     this.callback(null, source, inputMap);
     return;
   }
@@ -151,6 +153,7 @@ function runtimeLensLoader(this: MinimalLoaderContext, source: string, inputMap?
       filename: file,
       agentModule,
       moduleKind: 'esm',
+      excludeRoot: this.rootContext,
       sourceMaps: true,
       captureConsole: options.captureConsole !== false,
       captureExpressions: options.captureExpressions !== false

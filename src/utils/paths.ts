@@ -36,7 +36,10 @@ export function normalizePath(p: string): string {
  * Every entry point (Vite plugin, Node loader, extension host) funnels
  * through here so the exclusion rules cannot drift apart.
  */
-export function shouldInstrument(filePath: string, opts: { extraExcludes?: readonly string[] } = {}): boolean {
+export function shouldInstrument(
+  filePath: string,
+  opts: { extraExcludes?: readonly string[]; root?: string } = {}
+): boolean {
   if (!filePath) {
     return false;
   }
@@ -54,7 +57,7 @@ export function shouldInstrument(filePath: string, opts: { extraExcludes?: reado
   if (/\.d\.[cm]?ts$/.test(normalized)) {
     return false;
   }
-  const segments = normalized.split('/');
+  const segments = segmentsBelowRoot(normalized, opts.root ?? currentDirectory());
   const excluded = [...EXCLUDED_DIR_SEGMENTS, ...(opts.extraExcludes ?? [])];
   for (const segment of segments.slice(0, -1)) {
     if (excluded.includes(segment)) {
@@ -66,6 +69,37 @@ export function shouldInstrument(filePath: string, opts: { extraExcludes?: reado
     return false;
   }
   return true;
+}
+
+function currentDirectory(): string | undefined {
+  try {
+    return process.cwd();
+  } catch {
+    return undefined; // the working directory was deleted
+  }
+}
+
+/**
+ * Path segments of `normalized` below the project root, or all of them when
+ * the file is not under `root`.
+ *
+ * Excluded names such as `build`, `dist` or `out` mean *the project's output
+ * folders*. Matching them in the folders ABOVE the project (a checkout in
+ * `~/build/app`, `/opt/dist/app` or `C:\work\out\app`) silently disabled
+ * instrumentation for the whole project.
+ */
+function segmentsBelowRoot(normalized: string, root: string | undefined): string[] {
+  if (root) {
+    const base = normalizePath(root).replace(/\/+$/, '');
+    // Windows drive letters differ in case between tools (`C:` / `c:`).
+    const insensitive = /^[a-z]:\//i.test(normalized);
+    const left = insensitive ? normalized.toLowerCase() : normalized;
+    const right = insensitive ? base.toLowerCase() : base;
+    if (base.length > 0 && left.startsWith(`${right}/`)) {
+      return normalized.slice(base.length + 1).split('/');
+    }
+  }
+  return normalized.split('/');
 }
 
 /** True when a file cannot be executed by bare `node` (JSX syntax). */

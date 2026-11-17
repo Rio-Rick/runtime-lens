@@ -23,6 +23,7 @@ interface MinimalVitePlugin {
   name: string;
   enforce?: 'pre' | 'post';
   apply?: 'serve' | 'build';
+  configResolved?(config: { root?: string }): void;
   resolveId(this: unknown, id: string): string | undefined;
   load(this: unknown, id: string, options?: { ssr?: boolean }): string | undefined;
   transform(
@@ -52,10 +53,16 @@ function runtimeLensVite(options: RuntimeLensViteOptions = {}): MinimalVitePlugi
   const browserAgentPath = path.join(__dirname, '..', 'agent', 'browser-agent.mjs');
   const nodeAgentPath = path.join(__dirname, '..', 'agent', 'node-agent.js');
 
+  let projectRoot: string | undefined;
+
   return {
     name: 'runtime-lens',
     enforce: 'pre',
     apply: 'serve',
+
+    configResolved(config: { root?: string }): void {
+      projectRoot = config.root;
+    },
 
     resolveId(id: string): string | undefined {
       return id === VIRTUAL_ID ? RESOLVED_VIRTUAL_ID : undefined;
@@ -97,13 +104,14 @@ function runtimeLensVite(options: RuntimeLensViteOptions = {}): MinimalVitePlugi
         return undefined;
       }
       const file = id.split('?')[0];
-      if (!shouldInstrument(file, { extraExcludes: options.exclude })) {
+      if (!shouldInstrument(file, { extraExcludes: options.exclude, root: projectRoot })) {
         return undefined;
       }
       const result = instrument(code, {
         filename: file,
         agentModule: VIRTUAL_ID,
         moduleKind: 'esm',
+        excludeRoot: projectRoot,
         captureConsole: options.captureConsole ?? true,
         captureExpressions: options.captureExpressions ?? true,
         sourceMaps: true

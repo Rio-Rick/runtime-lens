@@ -39,6 +39,20 @@ button:hover {
   background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
 }
 
+button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+input[type='checkbox'] {
+  accent-color: var(--vscode-button-background);
+}
+
 .rl-shell {
   display: flex;
   flex-direction: column;
@@ -153,10 +167,23 @@ main {
   background: var(--rl-hover);
 }
 
+.event-row:focus-visible {
+  outline-offset: -1px;
+}
+
 .event-row.selected {
   background: var(--rl-selection);
   color: var(--rl-selection-fg);
   border-left-color: var(--vscode-focusBorder);
+}
+
+/* descriptionForeground is tuned for the editor background; on the selection colour it can be
+   nearly invisible (e.g. grey on blue in light themes), so secondary text follows the row. */
+.event-row.selected .glyph,
+.event-row.selected .index,
+.event-row.selected .meta {
+  color: inherit;
+  opacity: 0.85;
 }
 
 .glyph {
@@ -209,12 +236,14 @@ main {
 .value {
   margin: 0;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   color: var(--rl-code);
   font-family: var(--vscode-editor-font-family);
 }
 
 .hint {
+  margin: 0;
+  padding: var(--rl-gap);
   opacity: 0.6;
 }
 
@@ -261,11 +290,6 @@ main {
 
 .rl-table-action {
   padding: 3px 9px;
-}
-
-.rl-table-action:disabled {
-  cursor: default;
-  opacity: 0.55;
 }
 
 .table-heading {
@@ -615,4 +639,23 @@ mark.rl-match {
 
 .rl-tree-bar .rl-tree-note {
   padding-left: 0;
+}
+
+/* Narrow panel (side column, small window): stack the list above the detail pane instead of
+   letting the fixed list width push the detail pane out of view (the page does not scroll). */
+@media (max-width: 560px) {
+  main {
+    flex-direction: column;
+  }
+
+  .list {
+    flex: 0 1 40%;
+    min-width: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--rl-border);
+  }
+
+  .detail {
+    flex: 1 1 60%;
+  }
 }

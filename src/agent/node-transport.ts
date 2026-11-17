@@ -124,17 +124,64 @@ export function createNodeAgent(options: CreateNodeAgentOptions): Agent {
   const agent = new Agent(config, transport);
 
   if (options.installProcessHooks !== false) {
-    const loc = { file: config.cwd ?? process.cwd(), line: 1, column: 0 };
-    process.on('uncaughtException', (err) => {
-      agent.reportError(err, loc, true);
-      throw err;
-    });
-    process.on('unhandledRejection', (reason) => {
-      agent.reportError(reason, loc, false);
-    });
-    process.on('beforeExit', () => agent.flush());
-    process.on('exit', () => agent.flush());
+    installProcessHooks(agent, config.cwd ?? process.cwd());
   }
 
   return agent;
+}
+
+/** True when the host process picked an unhandled-rejection mode itself (`--unhandled-rejections=...`). */
+function hasExplicitRejectionMode(proc: NodeJS.Process): boolean {
+  const flags = [...proc.execArgv, ...(proc.env.NODE_OPTIONS ?? '').split(/\s+/)];
+  return flags.some((flag) => flag.startsWith('--unhandled-rejections'));
+}
+
+/**
+ * Report crashes and unhandled rejections without changing what the program
+ * does (rule 1 of the agent: never change observable behaviour).
+ *
+ * Merely *adding* a listener changes Node's behaviour: with an
+ * `unhandledRejection` listener installed Node no longer crashes on a
+ * rejection nor prints it, and re-throwing from an `uncaughtException`
+ * listener changes the exit code (1 -> 7) and the printed stack. So:
+ *  - crashes are observed through `uncaughtExceptionMonitor`, which exists for
+ *    exactly this and leaves Node's default handling untouched;
+ *  - for rejections the only hook is the listener, so when ours is the only
+ *    one (and the app chose no `--unhandled-rejections` mode) it restores the
+ *    default by raising the rejection as an uncaught exception, as Node does.
+ */
+export function installProcessHooks(agent: Agent, file: string, proc: NodeJS.Process = process): void {
+  const loc = { file, line: 1, column: 0 };
+  const reported = new WeakSet<object>();
+  const report = (err: unknown, fatal: boolean): void => {
+    if (typeof err === 'object' && err !== null) {
+      if (reported.has(err)) {
+        return; // e.g. a rejection we re-raise reaches the crash monitor too
+      }
+      reported.add(err);
+    }
+    agent.reportError(err, loc, fatal);
+  };
+
+  proc.on('uncaughtExceptionMonitor', (err: unknown) => report(err, true));
+  proc.on('unhandledRejection', (reason: unknown) => {
+    const restoreDefault = proc.listenerCount('unhandledRejection') === 1 && !hasExplicitRejectionMode(proc);
+    if (!restoreDefault) {
+      report(reason, false);
+      return;
+    }
+    const crash = reason instanceof Error ? reason : new Error(`Unhandled promise rejection: ${safeString(reason)}`);
+    report(crash, true);
+    throw crash;
+  });
+  proc.on('beforeExit', () => agent.flush());
+  proc.on('exit', () => agent.flush());
+}
+
+function safeString(value: unknown): string {
+  try {
+    return String(value).slice(0, 500);
+  } catch {
+    return '<unprintable>';
+  }
 }

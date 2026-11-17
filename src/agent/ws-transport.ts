@@ -97,9 +97,22 @@ function activeNodeHandleSnapshot(): ReadonlySet<unknown> {
   return typeof getActiveHandles === 'function' ? new Set(getActiveHandles.call(proc)) : new Set();
 }
 
+/** First retry delay after a connection attempt that never opened; doubles per consecutive failure. */
+const RECONNECT_BASE_MS = 250;
+/** Ceiling for the retry delay, so a long-gone editor costs one cheap attempt every few seconds. */
+const RECONNECT_MAX_MS = 10_000;
+
 /**
  * Shared WebSocket transport (browser + modern Node). Buffers up to 200
  * messages while the socket opens, then drains them in order.
+ *
+ * Reconnect rules (this runs inside the *user's* process, so it must never
+ * become a busy loop):
+ *  - a connection that dropped after having been open is retried at once;
+ *  - one that never opened (editor closed, token no longer valid) is retried
+ *    with exponential backoff, capped at `RECONNECT_MAX_MS`;
+ *  - events from a socket that has already been replaced are ignored, so a
+ *    late `close` of the old socket can't tear down the new one.
  */
 export function createGlobalWebSocketTransport(
   WebSocketCtor: new (url: string) => WebSocketLike,
@@ -111,6 +124,8 @@ export function createGlobalWebSocketTransport(
   let closed = false;
   let helloMessage: string | undefined;
   let needsHello = false;
+  let failures = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const queue: string[] = [];
 
   const transport: AgentTransport = {
@@ -124,6 +139,7 @@ export function createGlobalWebSocketTransport(
     },
     close(): void {
       closed = true;
+      clearReconnectTimer();
       try {
         socket?.close();
       } catch {
@@ -131,6 +147,49 @@ export function createGlobalWebSocketTransport(
       }
     }
   };
+
+  function clearReconnectTimer(): void {
+    if (reconnectTimer !== undefined) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+  }
+
+  /** Forget `ws` (it is broken or being replaced) and close it; its later events are ignored. */
+  function dropSocket(ws: WebSocketLike): void {
+    if (socket === ws) {
+      socket = undefined;
+    }
+    open = false;
+    if (helloMessage) {
+      needsHello = true;
+    }
+    try {
+      ws.close();
+    } catch {
+      /* already unusable */
+    }
+    transport.onStateChange?.(false);
+  }
+
+  function scheduleReconnect(): void {
+    if (closed || socket || reconnectTimer !== undefined || queue.length === 0) {
+      return;
+    }
+    if (failures === 0) {
+      connect();
+      return;
+    }
+    const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(failures - 1, 10));
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      if (!closed && !socket && queue.length > 0) {
+        connect();
+      }
+    }, delay);
+    // Never keep a Node process alive just to retry telemetry.
+    (reconnectTimer as unknown as { unref?: () => void }).unref?.();
+  }
 
   function enqueue(json: string): void {
     if (closed) {
@@ -141,21 +200,16 @@ export function createGlobalWebSocketTransport(
         socket.send(json);
         return;
       } catch {
-        open = false;
-        const failedSocket = socket;
-        socket = undefined;
-        try {
-          failedSocket.close();
-        } catch {
-          transport.onStateChange?.(false);
-        }
+        dropSocket(socket);
       }
     }
     if (queue.length >= maxQueued) {
       queue.shift();
     }
     queue.push(json);
-    if (!socket) {
+    // While a backoff timer is pending the next attempt is already scheduled;
+    // connecting here would turn every flush into a connection attempt.
+    if (!socket && reconnectTimer === undefined) {
       connect();
     }
   }
@@ -165,14 +219,24 @@ export function createGlobalWebSocketTransport(
       return;
     }
     const before = activeNodeHandleSnapshot();
+    let ws: WebSocketLike;
     try {
-      socket = new WebSocketCtor(url);
+      ws = new WebSocketCtor(url);
     } catch {
-      socket = undefined;
       open = false;
+      failures++;
+      scheduleReconnect();
       return;
     }
-    socket.onopen = () => {
+    socket = ws;
+    let everOpened = false;
+
+    ws.onopen = () => {
+      if (socket !== ws) {
+        return;
+      }
+      everOpened = true;
+      failures = 0;
       open = true;
       transport.onStateChange?.(true);
       const pending = queue.splice(0, queue.length);
@@ -182,21 +246,15 @@ export function createGlobalWebSocketTransport(
       for (let index = 0; index < pending.length; index++) {
         const item = pending[index];
         try {
-          socket?.send(item);
+          ws.send(item);
           if (needsHello && item === helloMessage) {
             needsHello = false;
           }
         } catch {
           queue.unshift(...pending.slice(index));
-          open = false;
-          const failedSocket = socket;
-          socket = undefined;
-          try {
-            failedSocket?.close();
-          } catch {
-            transport.onStateChange?.(false);
-          }
-          break;
+          dropSocket(ws);
+          scheduleReconnect();
+          return;
         }
       }
       // Only unref once the handshake is done and everything queued while
@@ -209,22 +267,28 @@ export function createGlobalWebSocketTransport(
       // wait around afterwards.
       unrefNewNodeHandles(before, url);
     };
-    socket.onclose = () => {
+    ws.onclose = () => {
+      if (socket !== ws) {
+        return; // a socket we already replaced; its late close must not touch the new one
+      }
       open = false;
       socket = undefined;
       if (helloMessage) {
         needsHello = true;
       }
+      if (!everOpened) {
+        failures++;
+      }
       transport.onStateChange?.(false);
-      if (!closed && queue.length > 0) {
-        connect();
+      scheduleReconnect();
+    };
+    ws.onerror = () => {
+      if (socket === ws) {
+        open = false;
       }
     };
-    socket.onerror = () => {
-      open = false;
-    };
-    socket.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
+    ws.onmessage = (ev) => {
+      if (socket === ws && typeof ev.data === 'string') {
         transport.onMessage?.(ev.data);
       }
     };
@@ -232,4 +296,3 @@ export function createGlobalWebSocketTransport(
 
   return transport;
 }
-

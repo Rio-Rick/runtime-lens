@@ -1,4 +1,10 @@
-import type { SerializedValue } from '../protocol';
+import {
+  MAX_SERIALIZED_HINT,
+  MAX_SERIALIZED_KEY,
+  MAX_SERIALIZED_NAME,
+  MAX_SERIALIZED_TEXT,
+  type SerializedValue
+} from '../protocol';
 
 export interface SerializeOptions {
   /** Maximum nesting depth before emitting a `maxdepth` marker. */
@@ -20,6 +26,16 @@ export const DEFAULT_SERIALIZE_OPTIONS: SerializeOptions = {
   includeStack: true,
   maxNodes: 5_000
 };
+
+/**
+ * Cut `text` to at most `max` characters, ending in an ellipsis when it was
+ * cut. Every free-text field of a serialized value goes through this with the
+ * limit `validateSerializedValue` enforces, because one over-long field gets
+ * the whole batch it travels in rejected.
+ */
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
 
 const TYPED_ARRAY_TAG = /^(Int|Uint|Float|BigInt|BigUint)(8|16|32|64)(Clamped)?Array$/;
 
@@ -106,10 +122,15 @@ function walk(
         return { k: 'number', v: '-Infinity' };
       }
       return { k: 'number', v: value };
-    case 'bigint':
-      return { k: 'bigint', v: `${value.toString()}n` };
+    case 'bigint': {
+      const text = `${value.toString()}n`;
+      // A truncated number would be a different number: say so instead.
+      return text.length > MAX_SERIALIZED_TEXT
+        ? { k: 'unserializable', hint: `BigInt with ${text.length - 1} digits (too large to show)` }
+        : { k: 'bigint', v: text };
+    }
     case 'symbol':
-      return { k: 'symbol', v: value.toString() };
+      return { k: 'symbol', v: clip(value.toString(), MAX_SERIALIZED_TEXT) };
     case 'string': {
       if (value.length > opts.maxStringLength) {
         return { k: 'string', v: value.slice(0, opts.maxStringLength), truncated: true, length: value.length };
@@ -124,7 +145,7 @@ function walk(
       } catch {
         name = '';
       }
-      return { k: 'function', name: name || '(anonymous)', kind: functionKind(fn), arity: safeArity(fn) };
+      return { k: 'function', name: clip(name || '(anonymous)', MAX_SERIALIZED_NAME), kind: functionKind(fn), arity: safeArity(fn) };
     }
     default:
       break;
@@ -133,7 +154,7 @@ function walk(
   const obj = value as object;
   const existing = seen.get(obj);
   if (existing !== undefined) {
-    return { k: 'circular', path: existing };
+    return { k: 'circular', path: clip(existing, MAX_SERIALIZED_HINT) };
   }
 
   const tag = tagOf(obj);
@@ -143,30 +164,34 @@ function walk(
     return { k: 'date', v: Number.isNaN(time) ? 'Invalid Date' : new Date(time).toISOString() };
   }
   if (tag === 'RegExp') {
-    return { k: 'regexp', v: String(obj) };
+    return { k: 'regexp', v: clip(String(obj), MAX_SERIALIZED_TEXT) };
   }
-  if (obj instanceof Error || tag === 'Error' || /Error$/.test((obj as { name?: string }).name ?? '')) {
+  if (isErrorLike(obj, tag)) {
     const err = obj as Error & Record<string, unknown>;
     const props: Record<string, SerializedValue> = {};
     seen.set(obj, path);
-    for (const key of ownKeys(err) ?? []) {
+    let kept = 0;
+    for (const key of ownKeys(err)) {
       if (key === 'stack' || key === 'message' || key === 'name') {
         continue;
+      }
+      if (kept++ >= opts.maxEntries) {
+        break; // like every other container; also keeps `props` within what the protocol accepts
       }
       props[key] = walk(readProp(err, key), opts, seen, state, depth + 1, `${path}.${key}`);
     }
     seen.delete(obj);
     return {
       k: 'error',
-      name: String(err.name ?? 'Error'),
-      message: String(err.message ?? ''),
+      name: clip(String(err.name ?? 'Error'), MAX_SERIALIZED_NAME),
+      message: clip(String(err.message ?? ''), MAX_SERIALIZED_TEXT),
       stack: opts.includeStack && typeof err.stack === 'string' ? err.stack.slice(0, 8000) : undefined,
       props: Object.keys(props).length > 0 ? props : undefined
     };
   }
 
   if (depth >= opts.depth) {
-    return { k: 'maxdepth', hint: describeShallow(obj, tag) };
+    return { k: 'maxdepth', hint: clip(describeShallow(obj, tag), MAX_SERIALIZED_HINT) };
   }
 
   seen.set(obj, path);
@@ -228,32 +253,45 @@ function walk(
       return { k: 'unserializable', hint: 'Promise (pending state not observable synchronously)' };
     }
 
-    const ctor = constructorName(obj);
-    let keys = ownKeys(obj);
-    if (keys === null) {
-      // Object.keys threw (hostile Proxy, revoked Proxy...). Say so instead of rendering a fake `{}`.
-      return { k: 'unserializable', hint: `${ctor ?? tag} (properties not readable)` };
-    }
-    if (keys.length === 0) {
-      // Own keys are empty. Class-like objects (DOM events, some library wrappers) can keep their
-      // data as enumerable *inherited* properties; show those rather than a misleading `{}`.
-      keys = inheritedDataKeys(obj);
-    }
+    const keys = ownKeys(obj);
     const limit = Math.min(keys.length, opts.maxEntries);
     const entries: Array<[string, SerializedValue]> = [];
     for (let i = 0; i < limit; i++) {
       const key = keys[i];
-      entries.push([key, walk(readProp(obj, key), opts, seen, state, depth + 1, `${path}.${key}`)]);
+      entries.push([clip(key, MAX_SERIALIZED_KEY), walk(readProp(obj, key), opts, seen, state, depth + 1, `${path}.${key}`)]);
     }
+    const ctor = constructorName(obj);
     return {
       k: 'object',
-      ctor: ctor && ctor !== 'Object' ? ctor : undefined,
+      ctor: ctor && ctor !== 'Object' ? clip(ctor, MAX_SERIALIZED_NAME) : undefined,
       entries,
       size: keys.length,
       truncated: keys.length > limit || undefined
     };
   } finally {
     seen.delete(obj);
+  }
+}
+
+/**
+ * Whether `obj` should be shown as an error. The `name` fallback exists for
+ * error-like host objects whose tag is not `Error` (a `DOMException` called
+ * `AbortError`), so it applies only to objects with a non-plain tag: a plain
+ * `{ name: 'ValidationError', field: 'email' }` is data, not an error, and used
+ * to be shown as an error with an empty message.
+ */
+function isErrorLike(obj: object, tag: string): boolean {
+  if (obj instanceof Error || tag === 'Error') {
+    return true;
+  }
+  if (tag === 'Object') {
+    return false;
+  }
+  try {
+    const name = (obj as { name?: unknown }).name;
+    return typeof name === 'string' && /Error$/.test(name);
+  } catch {
+    return false;
   }
 }
 
@@ -265,44 +303,12 @@ function safeArity(fn: Function): number {
   }
 }
 
-function ownKeys(obj: object): string[] | null {
+function ownKeys(obj: object): string[] {
   try {
     return Object.keys(obj);
   } catch {
-    return null;
+    return [];
   }
-}
-
-/**
- * Fallback for an object whose `Object.keys` is empty. Libraries (antd / rc-*, etc.) wrap React's
- * event with `Object.create(event, { target: { value } })`: the wrapper owns only NON-enumerable
- * `target` / `currentTarget`, and everything else is inherited from the real event. Collect both:
- * own non-enumerable names first, then enumerable inherited ones (`for...in`). Functions are skipped.
- */
-function inheritedDataKeys(obj: object): string[] {
-  const out: string[] = [];
-  const seenKeys = new Set<string>();
-  const add = (key: string): void => {
-    if (!seenKeys.has(key) && out.length < 1_000 && typeof readProp(obj, key) !== 'function') {
-      seenKeys.add(key);
-      out.push(key);
-    }
-  };
-  try {
-    for (const key of Object.getOwnPropertyNames(obj)) {
-      add(key);
-    }
-  } catch {
-    /* ignore */
-  }
-  try {
-    for (const key in obj) {
-      add(key);
-    }
-  } catch {
-    /* keep whatever was collected */
-  }
-  return out;
 }
 
 function readProp(obj: object, key: string): unknown {

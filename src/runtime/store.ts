@@ -142,7 +142,7 @@ export class EventStore {
   private totalAdded = 0;
 
   constructor(maxHistory: number, private readonly renderText: (event: RuntimeEvent) => string) {
-    this.buffer = new RingBuffer<StoredEvent>(Math.max(50, maxHistory));
+    this.buffer = new RingBuffer<StoredEvent>(Math.max(50, Math.floor(maxHistory)));
   }
 
   get filter(): EventFilter {
@@ -155,7 +155,11 @@ export class EventStore {
   }
 
   setMaxHistory(maxHistory: number): void {
-    this.buffer.resize(Math.max(50, maxHistory));
+    const next = Math.max(50, Math.floor(maxHistory));
+    if (next === this.buffer.capacity) {
+      return; // called on every settings change; rebuilding the indexes is O(history)
+    }
+    this.buffer.resize(next);
     this.rebuildIndexes();
   }
 

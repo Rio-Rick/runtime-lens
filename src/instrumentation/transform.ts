@@ -32,6 +32,12 @@ export interface TransformOptionsRL {
   stripTypes?: boolean;
   /** Root used to make ids stable across machines. */
   projectRoot?: string;
+  /**
+   * Root below which excluded folders (`build`, `dist`, ...) are matched; defaults to
+   * `projectRoot`, then to the working directory. Unlike `projectRoot` it does not
+   * change probe ids.
+   */
+  excludeRoot?: string;
 }
 
 export interface TransformResult {
@@ -125,9 +131,18 @@ function createPlugin(opts: Required<Pick<TransformOptionsRL, 'captureConsole' |
     return '<expr>';
   };
 
-  const hasProbeComment = (node: t.Node): boolean => {
-    const comments = [...(node.trailingComments ?? []), ...(node.leadingComments ?? [])];
-    return comments.some((c) => c.type === 'CommentLine' && PROBE_COMMENT.test(c.value));
+  /**
+   * A probe is a `// ?` comment *trailing the statement on its last line*.
+   * Babel also attaches that same comment as a *leading* comment of the next
+   * statement, so looking at leading comments made `foo();` on the following
+   * line (or the `return` after a probed declaration) a probe as well.
+   */
+  const hasProbeComment = (node: t.Node, owner?: t.Node): boolean => {
+    const endLine = node.loc?.end.line;
+    const candidates = [...(node.trailingComments ?? []), ...(owner?.trailingComments ?? [])];
+    return candidates.some(
+      (c) => c.type === 'CommentLine' && PROBE_COMMENT.test(c.value) && c.loc !== undefined && c.loc !== null && c.loc.start.line === endLine
+    );
   };
 
   return {
@@ -251,7 +266,8 @@ function createPlugin(opts: Required<Pick<TransformOptionsRL, 'captureConsole' |
         if (!opts.captureExpressions) {
           return;
         }
-        if (!hasProbeComment(declPath.node)) {
+        const exported = declPath.parent;
+        if (!hasProbeComment(declPath.node, t.isExportNamedDeclaration(exported) ? exported : undefined)) {
           return;
         }
         for (const declarator of declPath.get('declarations')) {
@@ -330,7 +346,7 @@ export function instrument(code: string, options: TransformOptionsRL): Transform
     projectRoot
   } = options;
 
-  if (!shouldInstrument(filename)) {
+  if (!shouldInstrument(filename, { root: options.excludeRoot ?? projectRoot })) {
     return { code, map: null, probes: [], skipped: true, reason: 'excluded-path' };
   }
   if (code.includes(INSTRUMENTED_MARKER)) {

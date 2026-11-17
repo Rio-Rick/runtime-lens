@@ -62,7 +62,7 @@ function create(): Agent | ReturnType<typeof createNoopAgent> {
     globalWithHooks.addEventListener('error', (ev: unknown) => {
       const e = ev as { message?: string; filename?: string; lineno?: number; colno?: number; error?: unknown };
       agent.reportError(e.error ?? e.message ?? 'error', {
-        file: e.filename ?? 'unknown',
+        file: e.filename || 'unknown',
         line: e.lineno ?? 1,
         column: e.colno ?? 0
       }, false);

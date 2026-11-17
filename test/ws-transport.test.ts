@@ -129,6 +129,72 @@ describe('agent/ws-transport (inbound messages)', () => {
     assert.deepEqual(second.sent, ['{\"t\":\"hello\"}', '{\"t\":\"event-1\"}', '{\"t\":\"event-2\"}']);
   });
 
+  it('backs off instead of reconnecting in a tight loop while the editor is unreachable', async () => {
+    const transport = createGlobalWebSocketTransport(FakeSocket, 'ws://127.0.0.1:1/rl?token=t');
+    transport.hello('{"t":"hello"}');
+    transport.send('{"t":"b1"}');
+    assert.equal(FakeSocket.instances.length, 1);
+
+    // The first attempt dies without ever opening. Every following flush must NOT open another socket.
+    FakeSocket.instances[0].close();
+    for (let i = 0; i < 50; i++) {
+      transport.send(`{"t":"b${i + 2}"}`);
+    }
+    assert.equal(FakeSocket.instances.length, 1, 'a failed attempt waits for the backoff timer');
+
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(FakeSocket.instances.length, 2, 'one retry once the delay has passed');
+
+    // Nothing is lost while waiting: the retry delivers hello first, then the queued batches.
+    const retry = FakeSocket.instances[1];
+    retry.open();
+    assert.equal(retry.sent[0], '{"t":"hello"}');
+    assert.ok(retry.sent.length > 1);
+    transport.close();
+  });
+
+  it('stops retrying once the transport is closed', async () => {
+    const transport = createGlobalWebSocketTransport(FakeSocket, 'ws://127.0.0.1:1/rl?token=t');
+    transport.hello('{"t":"hello"}');
+    FakeSocket.instances[0].close(); // never opened: a retry is now scheduled
+    transport.close();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(FakeSocket.instances.length, 1);
+  });
+
+  it('ignores the late close of a socket it has already replaced', () => {
+    class QuietSocket extends FakeSocket {
+      failSend = false;
+      send(data: string): void {
+        if (this.failSend) {
+          throw new Error('socket is half-closed');
+        }
+        super.send(data);
+      }
+      close(): void {
+        /* a real WebSocket reports `close` asynchronously; the test fires it by hand */
+      }
+    }
+    const transport = createGlobalWebSocketTransport(QuietSocket, 'ws://127.0.0.1:1/rl?token=t');
+    const states: boolean[] = [];
+    transport.onStateChange = (connected) => states.push(connected);
+    transport.hello('{"t":"hello"}');
+    const first = QuietSocket.instances[0] as QuietSocket;
+    first.open();
+    first.failSend = true;
+    transport.send('{"t":"b1"}'); // throws -> the transport replaces the socket
+    assert.equal(QuietSocket.instances.length, 2);
+
+    first.onclose?.(undefined); // ...and the old socket's close finally arrives
+    transport.send('{"t":"b2"}');
+    assert.equal(QuietSocket.instances.length, 2, 'the replacement is still the only live socket');
+
+    const second = QuietSocket.instances[1];
+    second.open();
+    assert.deepEqual(second.sent, ['{"t":"hello"}', '{"t":"b1"}', '{"t":"b2"}']);
+    assert.deepEqual(states, [true, false, true]);
+  });
+
   it('still delivers state changes alongside inbound messages', () => {
     const transport = createGlobalWebSocketTransport(FakeSocket, 'ws://127.0.0.1:1/rl?token=t');
     const states: boolean[] = [];

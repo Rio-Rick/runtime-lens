@@ -315,9 +315,9 @@ describe('package manifest integrity', () => {
       'runtimeLens.inlineValues': 'boolean',
       'runtimeLens.captureConsole': 'boolean',
       'runtimeLens.captureExpressions': 'boolean',
-      'runtimeLens.maxInlineLength': 'number',
-      'runtimeLens.objectDepth': 'number',
-      'runtimeLens.maxHistory': 'number',
+      'runtimeLens.maxInlineLength': 'integer',
+      'runtimeLens.objectDepth': 'integer',
+      'runtimeLens.maxHistory': 'integer',
       'runtimeLens.showTimestamp': 'boolean',
       'runtimeLens.showExecutionCount': 'boolean'
     };

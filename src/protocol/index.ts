@@ -232,7 +232,7 @@ function validateLocation(x: unknown): ValidationResult<SourceLocation> {
     return fail('bad-message', 'loc must be an object');
   }
   const { file, line, column } = x;
-  if (typeof file !== 'string' || file.length === 0 || file.length > 4096) {
+  if (typeof file !== 'string' || file.length === 0 || file.length > MAX_LOCATION_FILE_LENGTH) {
     return fail('bad-message', 'loc.file must be a non-empty string');
   }
   if (typeof line !== 'number' || !Number.isFinite(line) || line < 1) {
@@ -259,6 +259,28 @@ function validateLocation(x: unknown): ValidationResult<SourceLocation> {
 export const MAX_SERIALIZED_ENTRIES = 1_000;
 
 /**
+ * Length limits on the text inside a serialized value, and on one event.
+ * Like `MAX_SERIALIZED_ENTRIES`, the serializer and agent clip to these and
+ * `validateSerializedValue` / `validateEvent` enforce them: a value one side
+ * produces but the other refuses would get the *entire* batch it travels in
+ * rejected, so neither side may carry its own copy of the number.
+ */
+/** Longest `bigint` / `symbol` / `date` / `regexp` text and `error.message` / `error.stack`. */
+export const MAX_SERIALIZED_TEXT = 16_384;
+/** Longest function / error / constructor name. */
+export const MAX_SERIALIZED_NAME = 1_024;
+/** Longest object key. */
+export const MAX_SERIALIZED_KEY = 4_096;
+/** Longest `circular` path and `maxdepth` / `unserializable` hint. */
+export const MAX_SERIALIZED_HINT = 4_096;
+/** Most arguments of one console call that travel in a `log` event. */
+export const MAX_LOG_ARGS = 64;
+/** Longest event / probe id. */
+export const MAX_EVENT_ID_LENGTH = 128;
+/** Longest source file path in a location. */
+export const MAX_LOCATION_FILE_LENGTH = 4_096;
+
+/**
  * Structural validation of a serialized value. We deliberately do *not* try to
  * deep-clone or normalize: we only assert that `k` is a kind we can render, so
  * a malicious or buggy client cannot inject arbitrary shapes into the UI.
@@ -268,7 +290,8 @@ export function validateSerializedValue(x: unknown, depth = 0): boolean {
     return false;
   }
 
-  const validText = (value: unknown, max = 16_384): value is string => typeof value === 'string' && value.length <= max;
+  const validText = (value: unknown, max = MAX_SERIALIZED_TEXT): value is string =>
+    typeof value === 'string' && value.length <= max;
   const validCount = (value: unknown): value is number =>
     typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
   const validEntriesLength = (entries: unknown): entries is unknown[] =>
@@ -301,17 +324,17 @@ export function validateSerializedValue(x: unknown, depth = 0): boolean {
       return validText(x.v);
     case 'function':
       return (
-        validText(x.name, 1024) &&
+        validText(x.name, MAX_SERIALIZED_NAME) &&
         (x.kind === 'function' || x.kind === 'class' || x.kind === 'arrow') &&
         typeof x.arity === 'number' &&
         Number.isSafeInteger(x.arity) &&
         x.arity >= 0
       );
     case 'error':
-      if (!validText(x.name, 1024) || !validText(x.message, 16_384)) {
+      if (!validText(x.name, MAX_SERIALIZED_NAME) || !validText(x.message)) {
         return false;
       }
-      if (x.stack !== undefined && !validText(x.stack, 16_384)) {
+      if (x.stack !== undefined && !validText(x.stack)) {
         return false;
       }
       if (x.props === undefined) {
@@ -334,13 +357,13 @@ export function validateSerializedValue(x: unknown, depth = 0): boolean {
         validEntriesLength(x.entries) &&
         validCount(x.size) &&
         x.entries.length <= x.size &&
-        (x.ctor === undefined || validText(x.ctor, 1024)) &&
+        (x.ctor === undefined || validText(x.ctor, MAX_SERIALIZED_NAME)) &&
         (x.truncated === undefined || typeof x.truncated === 'boolean') &&
         x.entries.every(
           (entry) =>
             Array.isArray(entry) &&
             entry.length === 2 &&
-            validText(entry[0], 4096) &&
+            validText(entry[0], MAX_SERIALIZED_KEY) &&
             validateSerializedValue(entry[1], depth + 1)
         )
       );
@@ -367,10 +390,10 @@ export function validateSerializedValue(x: unknown, depth = 0): boolean {
         x.entries.every((entry) => validateSerializedValue(entry, depth + 1))
       );
     case 'circular':
-      return validText(x.path, 4096);
+      return validText(x.path, MAX_SERIALIZED_HINT);
     case 'maxdepth':
     case 'unserializable':
-      return validText(x.hint, 4096);
+      return validText(x.hint, MAX_SERIALIZED_HINT);
     default:
       return false;
   }
@@ -380,7 +403,7 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
   if (!isPlainRecord(x)) {
     return fail('bad-message', 'event must be an object');
   }
-  if (typeof x.id !== 'string' || x.id.length === 0 || x.id.length > 128) {
+  if (typeof x.id !== 'string' || x.id.length === 0 || x.id.length > MAX_EVENT_ID_LENGTH) {
     return fail('bad-message', 'event.id must be a short string');
   }
   if (typeof x.seq !== 'number' || !Number.isSafeInteger(x.seq) || x.seq < 0) {
@@ -403,7 +426,7 @@ function validateEvent(x: unknown): ValidationResult<RuntimeEvent> {
       if (typeof x.level !== 'string' || !LOG_LEVELS.includes(x.level as LogLevel)) {
         return fail('bad-message', `unknown log level: ${String(x.level)}`);
       }
-      if (!Array.isArray(x.args) || x.args.length > 64 || !x.args.every((a) => validateSerializedValue(a))) {
+      if (!Array.isArray(x.args) || x.args.length > MAX_LOG_ARGS || !x.args.every((a) => validateSerializedValue(a))) {
         return fail('bad-message', 'log.args must be an array of serialized values');
       }
       const ev: LogEvent = { ...base, t: 'log', level: x.level as LogLevel, args: x.args as SerializedValue[] };

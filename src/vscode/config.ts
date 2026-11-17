@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { MAX_SERIALIZED_ENTRIES } from '../protocol';
+import { clampInt } from '../utils/numbers';
 
 export interface RuntimeLensConfig {
   enabled: boolean;
@@ -29,18 +30,18 @@ export function readConfig(scope?: vscode.ConfigurationScope): RuntimeLensConfig
     inlineValues: c.get<boolean>('inlineValues', true),
     captureConsole: c.get<boolean>('captureConsole', true),
     captureExpressions: c.get<boolean>('captureExpressions', true),
-    maxInlineLength: clamp(c.get<number>('maxInlineLength', 120), 10, 2000),
-    objectDepth: clamp(c.get<number>('objectDepth', 3), 0, 10),
-    maxEntries: Math.floor(clamp(c.get<number>('maxEntries', 100), 1, MAX_SERIALIZED_ENTRIES)),
-    maxNodes: Math.floor(clamp(c.get<number>('maxNodes', 5000), 100, 100_000)),
-    maxHistory: clamp(c.get<number>('maxHistory', 5000), 50, 100_000),
+    maxInlineLength: clampInt(c.get<number>('maxInlineLength', 120), 10, 2000),
+    objectDepth: clampInt(c.get<number>('objectDepth', 3), 0, 10),
+    maxEntries: clampInt(c.get<number>('maxEntries', 100), 1, MAX_SERIALIZED_ENTRIES),
+    maxNodes: clampInt(c.get<number>('maxNodes', 5000), 100, 100_000),
+    maxHistory: clampInt(c.get<number>('maxHistory', 5000), 50, 100_000),
     showTimestamp: c.get<boolean>('showTimestamp', false),
     showExecutionCount: c.get<boolean>('showExecutionCount', true),
     showPreviousValue: c.get<boolean>('showPreviousValue', true),
     showValueStats: c.get<boolean>('showValueStats', true),
-    hoverHistory: clamp(c.get<number>('hoverHistory', 10), 0, 50),
-    port: clamp(c.get<number>('port', 0), 0, 65_535),
-    maxPayloadBytes: clamp(c.get<number>('maxPayloadBytes', 262_144), 4096, 4 * 1024 * 1024)
+    hoverHistory: clampInt(c.get<number>('hoverHistory', 10), 0, 50),
+    port: clampInt(c.get<number>('port', 0), 0, 65_535),
+    maxPayloadBytes: clampInt(c.get<number>('maxPayloadBytes', 262_144), 4096, 4 * 1024 * 1024)
   };
 }
 
@@ -51,11 +52,4 @@ export async function updateConfig<K extends keyof RuntimeLensConfig>(
   await vscode.workspace
     .getConfiguration(CONFIG_SECTION)
     .update(key, value, vscode.ConfigurationTarget.Workspace);
-}
-
-function clamp(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) {
-    return min;
-  }
-  return Math.min(max, Math.max(min, value));
 }

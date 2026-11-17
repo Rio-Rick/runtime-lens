@@ -10,7 +10,7 @@
  *  3. Never crash the host. Every callback is wrapped; a failure disables the
  *     agent instead of taking the app down.
  */
-import { MAX_SERIALIZED_ENTRIES, PROTOCOL_VERSION, parseServerMessage, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
+import { MAX_EVENT_ID_LENGTH, MAX_LOCATION_FILE_LENGTH, MAX_LOG_ARGS, MAX_SERIALIZED_ENTRIES, PROTOCOL_VERSION, parseServerMessage, type BatchMessage, type HelloMessage, type LogLevel, type RuntimeEvent, type RuntimeKind } from '../protocol';
 import { DEFAULT_SERIALIZE_OPTIONS, serialize } from '../serialization/serializer';
 import { utf8ByteLength } from '../utils/bytes';
 import { isTableSource, normalizeConsoleTable } from './console-table';
@@ -223,9 +223,15 @@ export class Agent {
       if (!this.disabled && !this.paused && this.config.captureConsole) {
         const count = this.bump(id);
         const serializeOptions = this.serializeOptions();
-        const serializedArgs = args.map((a, index) =>
+        // The protocol carries at most MAX_LOG_ARGS arguments per call; `console.log(...bigArray)`
+        // would otherwise get the whole batch rejected. The last slot says how many were left out.
+        const captured = args.length > MAX_LOG_ARGS ? args.slice(0, MAX_LOG_ARGS - 1) : args;
+        const serializedArgs = captured.map((a, index) =>
           serialize(a, level === 'table' && index === 0 ? { ...serializeOptions, ...TABLE_ARG_SERIALIZE } : serializeOptions)
         );
+        if (captured.length < args.length) {
+          serializedArgs.push({ k: 'unserializable', hint: `${args.length - captured.length} more arguments not captured` });
+        }
         const table = level === 'table' ? this.buildTable(args) : undefined;
         this.push({
           t: 'log',
@@ -277,9 +283,10 @@ export class Agent {
   }
 
   /** Report a runtime error (wired to uncaughtException / window.onerror). */
-  reportError(err: unknown, loc: { file: string; line: number; column: number }, fatal: boolean): void {
+  reportError(err: unknown, rawLoc: { file: string; line: number; column: number }, fatal: boolean): void {
     try {
-      const id = `err:${loc.file}:${loc.line}`;
+      const loc = sanitizeLocation(rawLoc);
+      const id = errorProbeId(loc.file, loc.line);
       const count = this.bump(id);
       const error = err instanceof Error ? err : new Error(String(err));
       this.push({
@@ -431,6 +438,35 @@ export class Agent {
   }
 }
 
+
+/**
+ * Make a location the protocol will accept. Browsers report a cross-origin
+ * script error as `filename: ''`, `lineno: 0`: sent as is, that one event gets
+ * its whole batch rejected.
+ */
+function sanitizeLocation(loc: { file: string; line: number; column: number }): { file: string; line: number; column: number } {
+  const file = typeof loc.file === 'string' && loc.file.length > 0 ? loc.file : 'unknown';
+  const line = Number.isFinite(loc.line) ? Math.max(1, Math.floor(loc.line)) : 1;
+  const column = Number.isFinite(loc.column) ? Math.max(0, Math.floor(loc.column)) : 0;
+  return {
+    file: file.length > MAX_LOCATION_FILE_LENGTH ? file.slice(file.length - MAX_LOCATION_FILE_LENGTH) : file,
+    line,
+    column
+  };
+}
+
+/**
+ * Probe id of a runtime error: `err:<file>:<line>`. A deep project path or a
+ * long bundler URL would exceed `MAX_EVENT_ID_LENGTH` and get the batch
+ * rejected, so an over-long file keeps its tail (the part that tells files
+ * apart).
+ */
+export function errorProbeId(file: string, line: number): string {
+  const suffix = `:${line}`;
+  const room = MAX_EVENT_ID_LENGTH - 'err:'.length - suffix.length;
+  const shown = file.length > room ? `…${file.slice(file.length - (room - 1))}` : file;
+  return `err:${shown}${suffix}`;
+}
 
 function errorText(err: unknown): string {
   try {

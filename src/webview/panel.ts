@@ -4,6 +4,7 @@ import type { EventStore, StoredEvent } from '../runtime/store';
 import { logger } from '../utils/logger';
 import { eventText } from '../vscode/render';
 import { toPlainText } from '../serialization/preview';
+import { createNonce } from '../utils/nonce';
 import { throttle } from '../utils/throttle';
 import {
   parseWebviewMessage,
@@ -282,13 +283,4 @@ function detailOf(stored: StoredEvent): string {
     return `${event.expr} =\n${toPlainText(event.value)}`;
   }
   return event.stack ?? event.message;
-}
-
-export function createNonce(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let out = '';
-  for (let i = 0; i < 32; i++) {
-    out += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return out;
 }
