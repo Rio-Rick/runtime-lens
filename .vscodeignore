@@ -1,0 +1,15 @@
+.vscode/**
+.vscode-test/**
+test/**
+out/test/**
+fixtures/**
+src/**
+scripts/**
+**/*.map
+**/tsconfig.json
+**/tsconfig.*.json
+**/.eslintrc.json
+.gitignore
+.github/**
+*.vsix
+.mocharc.json
